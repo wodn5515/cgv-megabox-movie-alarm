@@ -12,14 +12,22 @@ class ScheduleMonitor:
         self.discord_webhook = (
             config.get("notifications", {}).get("discord_webhook_url", "")
         )
-        n = len(self.targets)
-        self.interval = max(30, 60 * n / self.max_rpm)
         # 각 타겟의 오픈 여부
         self._opened: dict[str, bool] = {}
 
+    def _remaining_targets(self) -> list[dict]:
+        return [t for t in self.targets if not self._opened.get(t["name"])]
+
+    def _sleep_interval(self) -> float:
+        """RPM 제한을 지키는 요청 간 대기 시간."""
+        if not self._remaining_targets():
+            return 0
+        return 60 / self.max_rpm
+
     def run(self):
         n = len(self.targets)
-        print(f"모니터링 시작: {n}개 타겟, 요청 간격 {self.interval:.0f}초 "
+        interval = max(30, 60 * n / self.max_rpm)
+        print(f"모니터링 시작: {n}개 타겟, 요청 간격 {interval:.0f}초 "
               f"(분당 최대 {self.max_rpm}회)")
         for t in self.targets:
             print(f"  - {t['name']} | {t['date']} | "
@@ -29,10 +37,13 @@ class ScheduleMonitor:
 
         while True:
             for target in self.targets:
+                if self._opened.get(target["name"]):
+                    continue
+
                 self._poll(target)
 
                 # 전부 오픈 감지되면 종료
-                if all(self._opened.get(t["name"]) for t in self.targets):
+                if not self._remaining_targets():
                     now = datetime.now().strftime("%H:%M:%S")
                     print(f"\n[{now}] 모든 타겟 오픈 감지 완료. 모니터링 종료.")
                     notify_discord(
@@ -42,7 +53,7 @@ class ScheduleMonitor:
                     )
                     return
 
-                time.sleep(self.interval / n)
+                time.sleep(self._sleep_interval())
 
     def _poll(self, target: dict):
         name = target["name"]
@@ -51,10 +62,6 @@ class ScheduleMonitor:
         screen_filter = target.get("screen_filter", "")
         movie_filter = target.get("movie_filter", "")
         now = datetime.now().strftime("%H:%M:%S")
-
-        # 이미 오픈 감지된 타겟은 스킵
-        if self._opened.get(name):
-            return
 
         try:
             schedules = fetch_schedule(site_no, date)
@@ -65,6 +72,7 @@ class ScheduleMonitor:
         # 필터링
         if screen_filter:
             schedules = filter_screen(schedules, screen_filter)
+        # 영화 필터링
         if movie_filter:
             keyword = movie_filter.upper()
             schedules = [

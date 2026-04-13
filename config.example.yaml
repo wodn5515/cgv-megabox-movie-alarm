@@ -16,14 +16,14 @@ targets:
     movie_filter: "헤일메리"
 
   - name: "센텀 IMAX 헤일메리 4/20"
-    site_no: "0056"
+    site_no: "0089"
     date: "20260420"
     screen_filter: "IMAX"
     movie_filter: "헤일메리"
 
 # 영화관 코드
 # 0013: 용산아이파크몰
-# 0056: 센텀시티
+# 0089: 센텀시티
 # 0059: 영등포
 # 0074: 왕십리
 # 0105: 여의도

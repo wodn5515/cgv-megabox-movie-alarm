@@ -2,8 +2,6 @@ import hmac
 import hashlib
 import base64
 import time
-import json
-from urllib.parse import urlparse
 
 import requests
 
@@ -41,15 +39,6 @@ def _get(path: str, params: dict) -> dict:
     return resp.json()
 
 
-def fetch_dates(site_no: str) -> list[str]:
-    """영화관의 상영 가능 날짜 목록을 반환합니다."""
-    data = _get(
-        "/cnm/atkt/searchSiteScnscYmdListBySite",
-        {"coCd": "A420", "siteNo": site_no},
-    )
-    return [d["scnYmd"] for d in data.get("data", []) if d.get("scnYmd")]
-
-
 def fetch_schedule(site_no: str, date: str) -> list[dict]:
     """특정 영화관/날짜의 전체 스케줄을 반환합니다."""
     data = _get(
@@ -57,21 +46,6 @@ def fetch_schedule(site_no: str, date: str) -> list[dict]:
         {"coCd": "A420", "siteNo": site_no, "scnYmd": date, "rtctlScopCd": "08"},
     )
     return data.get("data", [])
-
-
-def fetch_last_date(site_no: str) -> str | None:
-    """영화관의 마지막 상영일을 반환합니다."""
-    data = _get(
-        "/cnm/atkt/searchLastScnDay",
-        {"coCd": "A420", "siteNo": site_no},
-    )
-    items = data.get("data", [])
-    return items[0]["scnYmd"] if items else None
-
-
-def filter_imax(schedules: list[dict]) -> list[dict]:
-    """IMAX 상영만 필터링합니다."""
-    return [s for s in schedules if "IMAX" in (s.get("scnsNm", "") or "")]
 
 
 def filter_screen(schedules: list[dict], screen_filter: str) -> list[dict]:
