@@ -231,20 +231,44 @@ async def book_cgv(target: dict, schedule: dict, booking: dict | None = None):
                 await asyncio.sleep(3)
                 break
 
-        # 4. 해당 시간 클릭
+        # 4. 해당 영화 섹션에서 시간 클릭
         time_display = f"{play_time[:2]}:{play_time[2:]}"
         print(f"[CGV] 스케줄 클릭: {movie_name} {time_display} {screen_name}")
 
-        time_btns = page.locator(f'button:has-text("{time_display}")')
-        if await time_btns.count() > 0:
-            await time_btns.first.click()
-            await asyncio.sleep(3)
+        # 영화명이 포함된 accordion 섹션 찾기
+        movie_keyword = target.get("movie_filter", "") or movie_name
+        movie_section = page.locator(
+            f'[class*="accordion_container"]:has(span.title2:has-text("{movie_keyword}"))'
+        ).first
 
-            # 로그인 필요 팝업
-            confirm = page.get_by_role("button", name="확인")
-            if await confirm.count() > 0:
-                await confirm.click()
-                await asyncio.sleep(5)
+        if await movie_section.count() > 0:
+            # 해당 영화 섹션 안에서 시간 버튼 찾기
+            time_btn = movie_section.locator(
+                f'[class*="screenInfo_start"]:has-text("{time_display}")'
+            ).locator("xpath=ancestor::button").first
+            if await time_btn.count() > 0:
+                await time_btn.click()
+                await asyncio.sleep(3)
+            else:
+                # 정확한 시간 못 찾으면 섹션 내 첫 번째 시간 클릭
+                fallback = movie_section.locator('[class*="screenInfo_timeLink"]').first
+                if await fallback.count() > 0:
+                    await fallback.click()
+                    await asyncio.sleep(3)
+                    print("[CGV] 정확한 시간 못 찾음, 첫 번째 시간 클릭")
+        else:
+            # 영화 섹션 못 찾으면 전체에서 시간 검색 (fallback)
+            fallback = page.locator(f'button:has-text("{time_display}")').first
+            if await fallback.count() > 0:
+                await fallback.click()
+                await asyncio.sleep(3)
+                print("[CGV] 영화 섹션 못 찾음, 전체에서 시간 클릭")
+
+        # 로그인 필요 팝업
+        confirm = page.get_by_role("button", name="확인")
+        if await confirm.count() > 0:
+            await confirm.click()
+            await asyncio.sleep(5)
 
         # 5. 인원 선택
         if booking.get("adults") or booking.get("teens"):
