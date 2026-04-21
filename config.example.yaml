@@ -5,6 +5,15 @@ max_requests_per_minute: 4
 # 사전에 python3 login.py [cgv|megabox] 로 로그인 필요
 auto_book: false
 
+# 예매 옵션 (auto_book 사용 시)
+booking:
+  adults: 2            # 일반(성인) 인원
+  teens: 0             # 청소년 인원
+  children: 0          # 어린이 인원
+  preferred_seats:     # 선호 좌석 (앞에서부터 시도, 불가 시 다음 좌석)
+    - "H12"
+    - "H13"
+
 notifications:
   discord_webhook_url: ""
 

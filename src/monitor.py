@@ -15,6 +15,7 @@ class ScheduleMonitor:
             config.get("notifications", {}).get("discord_webhook_url", "")
         )
         self.auto_book = config.get("auto_book", False)
+        self.booking = config.get("booking", {})
         self._opened: dict[str, bool] = {}
 
     def _remaining_targets(self) -> list[dict]:
@@ -127,8 +128,8 @@ class ScheduleMonitor:
             if self.auto_book:
                 first_schedule = schedules[0]
                 if typ == "megabox":
-                    asyncio.run(book_megabox(target, first_schedule))
+                    asyncio.run(book_megabox(target, first_schedule, self.booking))
                 else:
-                    asyncio.run(book_cgv(target, first_schedule))
+                    asyncio.run(book_cgv(target, first_schedule, self.booking))
         else:
             print(f"[{now}] {name}: 미오픈")

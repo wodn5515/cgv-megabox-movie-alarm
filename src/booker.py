@@ -1,12 +1,12 @@
 """
 오픈 감지 시 브라우저를 띄워서 예매 페이지로 자동 이동합니다.
-사용자가 좌석 선택 + 결제를 직접 완료합니다.
+인원 선택과 좌석 선택까지 자동화하고, 결제는 사용자가 직접 진행합니다.
 """
 import asyncio
 import json
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Page
 
 COOKIE_DIR = Path(__file__).parent.parent / "profiles"
 
@@ -21,7 +21,6 @@ THEATER_NAMES = {
     "0229": "건대입구",
 }
 
-# 극장 → 지역 탭 매핑 (극장 선택 모달에서 해당 지역 먼저 클릭)
 THEATER_REGION = {
     "0013": "서울",
     "0056": "서울",
@@ -43,8 +42,95 @@ def _load_cookies(site: str) -> list[dict] | None:
     return json.loads(cookie_file.read_text())
 
 
-async def book_cgv(target: dict, schedule: dict):
-    """CGV 예매 페이지를 열고 스케줄 클릭까지 자동 진행합니다."""
+async def _select_visitors(page: Page, booking: dict):
+    """인원 선택 화면에서 인원수를 설정합니다."""
+    adults = booking.get("adults", 1)
+    teens = booking.get("teens", 0)
+    children = booking.get("children", 0)
+
+    # 인원선택 페이지 로드 대기
+    await page.wait_for_selector('[id="number-choice-label"]', timeout=10000)
+    await asyncio.sleep(1)
+
+    # 일반(성인) 인원 설정 — 기본 0에서 + 버튼을 adults번 클릭
+    # 첫 번째 NumberChoice가 일반
+    number_sections = page.locator('[id="number-choice-label"]')
+    section_count = await number_sections.count()
+
+    if section_count > 0 and adults > 0:
+        # 일반 섹션의 + 버튼
+        first_section = number_sections.first.locator("xpath=..")
+        plus_btn = first_section.locator('button[aria-label*="증가"], button:has-text("+")')
+        for _ in range(adults):
+            if await plus_btn.count() > 0:
+                await plus_btn.first.click()
+                await asyncio.sleep(0.3)
+
+    # 청소년 (두 번째 섹션이 있으면)
+    if teens > 0 and section_count > 1:
+        teen_section = number_sections.nth(1).locator("xpath=..")
+        plus_btn = teen_section.locator('button[aria-label*="증가"], button:has-text("+")')
+        for _ in range(teens):
+            if await plus_btn.count() > 0:
+                await plus_btn.first.click()
+                await asyncio.sleep(0.3)
+
+    # 인원선택 확인 버튼
+    await asyncio.sleep(1)
+    confirm_btn = page.locator('button:has-text("인원선택")')
+    if await confirm_btn.count() > 0:
+        await confirm_btn.first.click()
+        await asyncio.sleep(2)
+
+    total = adults + teens + children
+    print(f"[CGV] 인원 선택: 일반 {adults}명, 청소년 {teens}명 (총 {total}명)")
+
+
+async def _select_seats(page: Page, booking: dict, total_count: int):
+    """좌석 선택 화면에서 선호 좌석을 선택합니다."""
+    preferred = booking.get("preferred_seats", [])
+    if not preferred:
+        print("[CGV] 선호 좌석 미설정 — 직접 선택하세요.")
+        return
+
+    # 좌석 맵 로드 대기
+    await asyncio.sleep(3)
+
+    selected = 0
+    for seat_id in preferred:
+        if selected >= total_count:
+            break
+
+        # 좌석 ID 파싱: "H12" → row="H", num="12"
+        row = seat_id[0].upper()
+        num = seat_id[1:]
+
+        # 좌석 버튼 찾기 — aria-label이나 data 속성으로 매칭
+        # CGV 좌석은 seatRowNm + seatNo로 식별
+        seat = page.locator(
+            f'[aria-label*="{row}열"][aria-label*="{num}"], '
+            f'[data-seat-row="{row}"][data-seat-no="{num}"]'
+        )
+        if await seat.count() > 0:
+            first = seat.first
+            # 이미 선택됐거나 예매 불가인지 확인
+            cls = await first.get_attribute("class") or ""
+            if "disabled" in cls or "sold" in cls or "isDisabled" in cls:
+                print(f"[CGV] 좌석 {seat_id}: 선택 불가 (이미 판매됨)")
+                continue
+            await first.click()
+            selected += 1
+            print(f"[CGV] 좌석 선택: {seat_id}")
+            await asyncio.sleep(0.5)
+        else:
+            print(f"[CGV] 좌석 {seat_id}: 찾을 수 없음")
+
+    if selected < total_count:
+        print(f"[CGV] {total_count - selected}석 추가 선택 필요 — 직접 선택하세요.")
+
+
+async def book_cgv(target: dict, schedule: dict, booking: dict | None = None):
+    """CGV 예매: 스케줄 클릭 → 인원 선택 → 좌석 선택까지 자동 진행합니다."""
     cookies = _load_cookies("cgv")
     if cookies is None:
         return
@@ -54,6 +140,7 @@ async def book_cgv(target: dict, schedule: dict):
     play_time = schedule.get("scnsrtTm", "")
     movie_name = schedule.get("movNm", "")
     screen_name = schedule.get("scnsNm", "")
+    booking = booking or {}
 
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(headless=False)
@@ -74,13 +161,12 @@ async def book_cgv(target: dict, schedule: dict):
         )
         await asyncio.sleep(2)
 
-        # 2. 극장 선택
+        # 2. 극장 선택 (미선택 상태인 경우)
         edit_btn = page.locator(".cnms01510_editBtn__FNDH8")
         if await edit_btn.count() > 0:
             await edit_btn.click()
             await asyncio.sleep(2)
 
-            # 지역 선택 (서울 외 지역이면 해당 지역 탭 클릭)
             region = THEATER_REGION.get(site_no, "서울")
             if region != "서울":
                 region_tab = page.locator(f"text={region}").first
@@ -88,7 +174,6 @@ async def book_cgv(target: dict, schedule: dict):
                     await region_tab.click()
                     await asyncio.sleep(1)
 
-            # 극장 클릭
             theater_name = THEATER_NAMES.get(site_no, "")
             if theater_name:
                 theater = page.locator(f"text={theater_name}").first
@@ -114,13 +199,28 @@ async def book_cgv(target: dict, schedule: dict):
             await time_btns.first.click()
             await asyncio.sleep(3)
 
-            # 로그인 필요 팝업이 뜨면 확인
+            # 로그인 필요 팝업
             confirm = page.get_by_role("button", name="확인")
             if await confirm.count() > 0:
                 await confirm.click()
                 await asyncio.sleep(5)
 
-        print("[CGV] 브라우저에서 인원 선택 → 좌석 선택 → 결제를 진행하세요.")
+        # 5. 인원 선택
+        if booking.get("adults") or booking.get("teens"):
+            try:
+                await _select_visitors(page, booking)
+            except Exception as e:
+                print(f"[CGV] 인원 선택 자동화 실패: {e}")
+
+            # 6. 좌석 선택
+            total = booking.get("adults", 0) + booking.get("teens", 0) + booking.get("children", 0)
+            if booking.get("preferred_seats") and total > 0:
+                try:
+                    await _select_seats(page, booking, total)
+                except Exception as e:
+                    print(f"[CGV] 좌석 선택 자동화 실패: {e}")
+
+        print("[CGV] 브라우저에서 남은 단계를 진행하세요.")
         print("[CGV] 브라우저를 닫으면 종료됩니다.")
 
         try:
@@ -139,7 +239,7 @@ async def book_cgv(target: dict, schedule: dict):
         await pw.stop()
 
 
-async def book_megabox(target: dict, schedule: dict):
+async def book_megabox(target: dict, schedule: dict, booking: dict | None = None):
     """메가박스 예매 페이지를 브라우저로 엽니다."""
     cookies = _load_cookies("megabox")
     if cookies is None:
