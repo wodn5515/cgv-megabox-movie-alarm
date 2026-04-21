@@ -43,65 +43,48 @@ def _load_cookies(site: str) -> list[dict] | None:
 
 
 async def _select_visitors(page: Page, booking: dict):
-    """인원 선택 화면에서 인원수를 설정합니다."""
+    """인원 선택: 숫자 버튼(1~8)을 클릭하여 인원수를 설정합니다."""
     adults = booking.get("adults", 1)
     teens = booking.get("teens", 0)
-    children = booking.get("children", 0)
 
-    # 인원선택 페이지 로드 대기
-    await page.wait_for_selector('[id="number-choice-label"]', timeout=10000)
+    # 관람인원 영역 로드 대기
+    await page.wait_for_selector('text=관람인원', timeout=10000)
     await asyncio.sleep(1)
 
-    # 일반(성인) 인원 설정 — 기본 0에서 + 버튼을 adults번 클릭
-    # 첫 번째 NumberChoice가 일반
-    number_sections = page.locator('[id="number-choice-label"]')
-    section_count = await number_sections.count()
+    # 인원 섹션은 .numberChoice_NumberWrap 으로 구분
+    # 첫 번째 = 일반, 두 번째 = 청소년
+    sections = page.locator('[class*="numberChoice_NumberWrap"]')
 
-    if section_count > 0 and adults > 0:
-        # 일반 섹션의 + 버튼
-        first_section = number_sections.first.locator("xpath=..")
-        plus_btn = first_section.locator('button[aria-label*="증가"], button:has-text("+")')
-        for _ in range(adults):
-            if await plus_btn.count() > 0:
-                await plus_btn.first.click()
-                await asyncio.sleep(0.3)
+    # 일반 인원
+    if adults > 0 and await sections.count() > 0:
+        adult_btn = sections.nth(0).locator(f'button[aria-label="{adults} 선택"]')
+        if await adult_btn.count() > 0:
+            await adult_btn.click()
+            await asyncio.sleep(0.5)
+            print(f"[CGV] 일반 {adults}명 선택")
 
-    # 청소년 (두 번째 섹션이 있으면)
-    if teens > 0 and section_count > 1:
-        teen_section = number_sections.nth(1).locator("xpath=..")
-        plus_btn = teen_section.locator('button[aria-label*="증가"], button:has-text("+")')
-        for _ in range(teens):
-            if await plus_btn.count() > 0:
-                await plus_btn.first.click()
-                await asyncio.sleep(0.3)
-
-    # 인원선택 확인 버튼
-    await asyncio.sleep(1)
-    confirm_btn = page.locator('button:has-text("인원선택")')
-    if await confirm_btn.count() > 0:
-        await confirm_btn.first.click()
-        await asyncio.sleep(2)
-
-    total = adults + teens + children
-    print(f"[CGV] 인원 선택: 일반 {adults}명, 청소년 {teens}명 (총 {total}명)")
+    # 청소년 인원
+    if teens > 0 and await sections.count() > 1:
+        teen_btn = sections.nth(1).locator(f'button[aria-label="{teens} 선택"]')
+        if await teen_btn.count() > 0:
+            await teen_btn.click()
+            await asyncio.sleep(0.5)
+            print(f"[CGV] 청소년 {teens}명 선택")
 
 
 async def _try_click_seat(page: Page, row: str, num: int) -> bool:
     """좌석 하나를 클릭 시도합니다. 성공하면 True."""
     seat_id = f"{row}{num}"
-    seat = page.locator(
-        f'[aria-label*="{row}열"][aria-label*="{num}번"], '
-        f'[data-seat-row="{row}"][data-seat-no="{num}"]'
-    )
+    # CGV 좌석: <span class="seatMainMap_seatNumber__..."><span>H12</span></span>
+    seat = page.locator(f'span[class*="seatMainMap_seatNumber"]:has(span:text-is("{seat_id}"))')
     if await seat.count() == 0:
         return False
     first = seat.first
     cls = await first.get_attribute("class") or ""
-    if "disabled" in cls or "sold" in cls or "isDisabled" in cls:
+    if "seatDisabled" in cls:
         return False
     try:
         await first.click(timeout=2000)
-        print(f"[CGV] 좌석 선택: {seat_id}")
         await asyncio.sleep(0.5)
         return True
     except Exception:
@@ -158,18 +141,24 @@ def _build_seat_search_order(preferred: list[str], max_col: int = 30) -> list[tu
 
 
 async def _select_seats(page: Page, booking: dict, total_count: int):
-    """좌석 선택 화면에서 선호 좌석 기준으로 가까운 좌석을 자동 선택합니다.
+    """좌석 선택: "선택" 버튼 → 모달 열기 → 선호 좌석 클릭.
 
     CGV는 인원수만큼 연석을 자동 선택하므로, 1번만 클릭하면 됩니다.
-    클릭한 좌석 기준으로 옆 좌석이 자동으로 함께 선택됩니다.
     """
     preferred = booking.get("preferred_seats", [])
     if not preferred:
         print("[CGV] 선호 좌석 미설정 — 직접 선택하세요.")
         return
 
-    # 좌석 맵 로드 대기
-    await asyncio.sleep(3)
+    # "좌석을 선택해 주세요" 옆의 "선택" 버튼 클릭
+    select_btn = page.locator('button.btn.btn-sm.fill-gray:has-text("선택")')
+    if await select_btn.count() > 0:
+        await select_btn.click()
+        await asyncio.sleep(3)
+        print("[CGV] 좌석 선택 모달 열림")
+    else:
+        print("[CGV] 좌석 선택 버튼을 찾지 못했습니다.")
+        return
 
     search_order = _build_seat_search_order(preferred)
 
@@ -178,7 +167,7 @@ async def _select_seats(page: Page, booking: dict, total_count: int):
             print(f"[CGV] 좌석 {row}{num} 클릭 → {total_count}석 연석 자동 선택")
             return
 
-    print(f"[CGV] 빈 좌석을 찾지 못했습니다 — 직접 선택하세요.")
+    print("[CGV] 빈 좌석을 찾지 못했습니다 — 직접 선택하세요.")
 
 
 async def book_cgv(target: dict, schedule: dict, booking: dict | None = None):
