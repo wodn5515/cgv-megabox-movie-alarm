@@ -86,8 +86,79 @@ async def _select_visitors(page: Page, booking: dict):
     print(f"[CGV] 인원 선택: 일반 {adults}명, 청소년 {teens}명 (총 {total}명)")
 
 
+async def _try_click_seat(page: Page, row: str, num: int) -> bool:
+    """좌석 하나를 클릭 시도합니다. 성공하면 True."""
+    seat_id = f"{row}{num}"
+    seat = page.locator(
+        f'[aria-label*="{row}열"][aria-label*="{num}번"], '
+        f'[data-seat-row="{row}"][data-seat-no="{num}"]'
+    )
+    if await seat.count() == 0:
+        return False
+    first = seat.first
+    cls = await first.get_attribute("class") or ""
+    if "disabled" in cls or "sold" in cls or "isDisabled" in cls:
+        return False
+    try:
+        await first.click(timeout=2000)
+        print(f"[CGV] 좌석 선택: {seat_id}")
+        await asyncio.sleep(0.5)
+        return True
+    except Exception:
+        return False
+
+
+def _build_seat_search_order(preferred: list[str], max_col: int = 30) -> list[tuple[str, int]]:
+    """선호 좌석 기준으로 탐색 순서를 생성합니다.
+
+    1. preferred_seats 목록 그대로
+    2. 선호 행에서 가까운 좌석 (중앙 기준 ±1, ±2, ...)
+    3. 주변 행 (±1행, ±2행, ...) 에서 같은 열 우선
+    """
+    if not preferred:
+        return []
+
+    # 선호 좌석 파싱
+    parsed = []
+    for s in preferred:
+        row = s[0].upper()
+        num = int(s[1:])
+        parsed.append((row, num))
+
+    # 기준점: 첫 번째 선호 좌석의 행과 열 중앙값
+    base_row = parsed[0][0]
+    base_col = sum(p[1] for p in parsed) // len(parsed)
+
+    result = list(parsed)  # 1. preferred 먼저
+    seen = set(parsed)
+
+    rows = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    base_row_idx = rows.index(base_row)
+
+    # 2~3. 행 거리 순서로 탐색 (0=같은 행, 1=위아래 1행, ...)
+    for row_offset in range(0, len(rows)):
+        for row_dir in ([0] if row_offset == 0 else [-1, 1]):
+            ri = base_row_idx + row_offset * row_dir
+            if ri < 0 or ri >= len(rows):
+                continue
+            r = rows[ri]
+
+            # 해당 행에서 기준 열로부터 가까운 순서
+            for col_offset in range(0, max_col):
+                for col_dir in ([0] if col_offset == 0 else [-1, 1]):
+                    c = base_col + col_offset * col_dir
+                    if c < 1:
+                        continue
+                    pair = (r, c)
+                    if pair not in seen:
+                        seen.add(pair)
+                        result.append(pair)
+
+    return result
+
+
 async def _select_seats(page: Page, booking: dict, total_count: int):
-    """좌석 선택 화면에서 선호 좌석을 선택합니다."""
+    """좌석 선택 화면에서 선호 좌석 기준으로 가까운 좌석을 자동 선택합니다."""
     preferred = booking.get("preferred_seats", [])
     if not preferred:
         print("[CGV] 선호 좌석 미설정 — 직접 선택하세요.")
@@ -96,36 +167,18 @@ async def _select_seats(page: Page, booking: dict, total_count: int):
     # 좌석 맵 로드 대기
     await asyncio.sleep(3)
 
+    search_order = _build_seat_search_order(preferred)
+
     selected = 0
-    for seat_id in preferred:
+    for row, num in search_order:
         if selected >= total_count:
             break
-
-        # 좌석 ID 파싱: "H12" → row="H", num="12"
-        row = seat_id[0].upper()
-        num = seat_id[1:]
-
-        # 좌석 버튼 찾기 — aria-label이나 data 속성으로 매칭
-        # CGV 좌석은 seatRowNm + seatNo로 식별
-        seat = page.locator(
-            f'[aria-label*="{row}열"][aria-label*="{num}"], '
-            f'[data-seat-row="{row}"][data-seat-no="{num}"]'
-        )
-        if await seat.count() > 0:
-            first = seat.first
-            # 이미 선택됐거나 예매 불가인지 확인
-            cls = await first.get_attribute("class") or ""
-            if "disabled" in cls or "sold" in cls or "isDisabled" in cls:
-                print(f"[CGV] 좌석 {seat_id}: 선택 불가 (이미 판매됨)")
-                continue
-            await first.click()
+        if await _try_click_seat(page, row, num):
             selected += 1
-            print(f"[CGV] 좌석 선택: {seat_id}")
-            await asyncio.sleep(0.5)
-        else:
-            print(f"[CGV] 좌석 {seat_id}: 찾을 수 없음")
 
-    if selected < total_count:
+    if selected >= total_count:
+        print(f"[CGV] 좌석 {selected}석 선택 완료")
+    else:
         print(f"[CGV] {total_count - selected}석 추가 선택 필요 — 직접 선택하세요.")
 
 
