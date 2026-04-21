@@ -151,7 +151,7 @@ async def _select_seats(page: Page, booking: dict, total_count: int):
         return
 
     # "좌석을 선택해 주세요" 옆의 "선택" 버튼 클릭
-    select_btn = page.locator('button.btn.btn-sm.fill-gray:has-text("선택")')
+    select_btn = page.locator('[class*="cnms01520_seatSelectWrap"] button:has-text("선택")')
     if await select_btn.count() > 0:
         await select_btn.click()
         await asyncio.sleep(3)
