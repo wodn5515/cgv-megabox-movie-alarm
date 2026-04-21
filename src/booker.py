@@ -158,7 +158,11 @@ def _build_seat_search_order(preferred: list[str], max_col: int = 30) -> list[tu
 
 
 async def _select_seats(page: Page, booking: dict, total_count: int):
-    """좌석 선택 화면에서 선호 좌석 기준으로 가까운 좌석을 자동 선택합니다."""
+    """좌석 선택 화면에서 선호 좌석 기준으로 가까운 좌석을 자동 선택합니다.
+
+    CGV는 인원수만큼 연석을 자동 선택하므로, 1번만 클릭하면 됩니다.
+    클릭한 좌석 기준으로 옆 좌석이 자동으로 함께 선택됩니다.
+    """
     preferred = booking.get("preferred_seats", [])
     if not preferred:
         print("[CGV] 선호 좌석 미설정 — 직접 선택하세요.")
@@ -169,17 +173,12 @@ async def _select_seats(page: Page, booking: dict, total_count: int):
 
     search_order = _build_seat_search_order(preferred)
 
-    selected = 0
     for row, num in search_order:
-        if selected >= total_count:
-            break
         if await _try_click_seat(page, row, num):
-            selected += 1
+            print(f"[CGV] 좌석 {row}{num} 클릭 → {total_count}석 연석 자동 선택")
+            return
 
-    if selected >= total_count:
-        print(f"[CGV] 좌석 {selected}석 선택 완료")
-    else:
-        print(f"[CGV] {total_count - selected}석 추가 선택 필요 — 직접 선택하세요.")
+    print(f"[CGV] 빈 좌석을 찾지 못했습니다 — 직접 선택하세요.")
 
 
 async def book_cgv(target: dict, schedule: dict, booking: dict | None = None):
