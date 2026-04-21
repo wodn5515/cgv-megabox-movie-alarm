@@ -1,7 +1,9 @@
+import asyncio
 import time
 from datetime import datetime
 
 from src import cgv_client, megabox_client
+from src.booker import book_cgv, book_megabox
 from src.notifier import notify_console, notify_discord
 
 
@@ -12,6 +14,7 @@ class ScheduleMonitor:
         self.discord_webhook = (
             config.get("notifications", {}).get("discord_webhook_url", "")
         )
+        self.auto_book = config.get("auto_book", False)
         self._opened: dict[str, bool] = {}
 
     def _remaining_targets(self) -> list[dict]:
@@ -119,5 +122,13 @@ class ScheduleMonitor:
             }
             notify_console(name, changes)
             notify_discord(self.discord_webhook, name, changes)
+
+            # 자동 예매 (브라우저 열기)
+            if self.auto_book:
+                first_schedule = schedules[0]
+                if typ == "megabox":
+                    asyncio.run(book_megabox(target, first_schedule))
+                else:
+                    asyncio.run(book_cgv(target, first_schedule))
         else:
             print(f"[{now}] {name}: 미오픈")

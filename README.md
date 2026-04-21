@@ -89,6 +89,35 @@ source venv/bin/activate
 python3 main.py
 ```
 
+## 자동 예매 (선택)
+
+오픈 감지 시 브라우저를 자동으로 띄워서 예매 페이지로 이동합니다.
+좌석 선택과 결제는 직접 진행해야 합니다.
+
+### 1. 로그인
+
+```bash
+# CGV 로그인 (브라우저가 열림, 로그인 후 Enter)
+python3 login.py cgv
+
+# 메가박스 로그인
+python3 login.py megabox
+```
+
+### 2. Playwright 설치
+
+```bash
+playwright install chromium
+```
+
+### 3. auto_book 활성화
+
+```yaml
+auto_book: true
+```
+
+오픈 감지 → Discord 알림 + 브라우저 자동 오픈 → 사용자가 좌석 선택 + 결제 완료
+
 ## Discord 알림 설정
 
 1. Discord에서 개인 서버 생성

@@ -1,6 +1,10 @@
 # 예매 오픈 모니터 설정
 max_requests_per_minute: 4
 
+# 오픈 감지 시 브라우저를 띄워서 예매 페이지로 자동 이동
+# 사전에 python3 login.py [cgv|megabox] 로 로그인 필요
+auto_book: false
+
 notifications:
   discord_webhook_url: ""
 
