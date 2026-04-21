@@ -1,45 +1,8 @@
-import asyncio
 import time
 from datetime import datetime
 
 from src import cgv_client, megabox_client
-from src.booker import book_cgv, book_megabox
 from src.notifier import notify_console, notify_discord
-
-
-def _parse_time_to_minutes(time_str: str) -> int:
-    """시간 문자열을 분으로 변환. "1840"→1120, "18:40"→1120"""
-    t = time_str.replace(":", "")
-    return int(t[:2]) * 60 + int(t[2:4])
-
-
-def _in_time_range(minutes: int, time_range: str) -> bool:
-    """시간(분)이 범위 안에 있는지 확인. "18:00-22:00" """
-    start, end = time_range.split("-")
-    start_m = _parse_time_to_minutes(start.strip())
-    end_m = _parse_time_to_minutes(end.strip())
-    return start_m <= minutes <= end_m
-
-
-def _pick_schedule(schedules: list[dict], booking: dict, typ: str) -> dict:
-    """preferred_times 우선순위에 따라 최적의 스케줄을 선택합니다."""
-    preferred_times = booking.get("preferred_times", [])
-    if not preferred_times:
-        return schedules[0]
-
-    time_key = "playStartTime" if typ == "megabox" else "scnsrtTm"
-
-    for time_range in preferred_times:
-        for s in schedules:
-            try:
-                m = _parse_time_to_minutes(s.get(time_key, ""))
-                if _in_time_range(m, time_range):
-                    return s
-            except (ValueError, IndexError):
-                continue
-
-    # 매칭되는 시간대가 없으면 첫 번째
-    return schedules[0]
 
 
 class ScheduleMonitor:
@@ -49,8 +12,6 @@ class ScheduleMonitor:
         self.discord_webhook = (
             config.get("notifications", {}).get("discord_webhook_url", "")
         )
-        self.auto_book = config.get("auto_book", False)
-        self.booking = config.get("booking", {})
         self._opened: dict[str, bool] = {}
 
     def _remaining_targets(self) -> list[dict]:
@@ -158,13 +119,5 @@ class ScheduleMonitor:
             }
             notify_console(name, changes)
             notify_discord(self.discord_webhook, name, changes)
-
-            # 자동 예매 (브라우저 열기)
-            if self.auto_book:
-                best = _pick_schedule(schedules, self.booking, typ)
-                if typ == "megabox":
-                    asyncio.run(book_megabox(target, best, self.booking))
-                else:
-                    asyncio.run(book_cgv(target, best, self.booking))
         else:
             print(f"[{now}] {name}: 미오픈")
