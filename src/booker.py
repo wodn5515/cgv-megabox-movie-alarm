@@ -75,11 +75,17 @@ async def _select_visitors(page: Page, booking: dict):
 async def _try_click_seat(page: Page, row: str, num: int) -> bool:
     """좌석 하나를 클릭 시도합니다. 성공하면 True."""
     seat_id = f"{row}{num}"
-    # CGV 좌석: <span class="seatMainMap_seatNumber__..."><span>H12</span></span>
-    seat = page.locator(f'span[class*="seatMainMap_seatNumber"]:has(span:text-is("{seat_id}"))')
+    # 모달 안 좌석: <button class="seatMap_seatNumber__JHck5 ..."><span>H12</span></button>
+    # react-transform-component 안의 실제 좌석맵에서 찾기 (미니맵 제외)
+    seat = page.locator(
+        f'.react-transform-component button[class*="seatMap_seatNumber"]:has(span:text-is("{seat_id}"))'
+    )
     if await seat.count() == 0:
         return False
     first = seat.first
+    # disabled 속성 또는 seatDisabled 클래스 체크
+    if await first.is_disabled():
+        return False
     cls = await first.get_attribute("class") or ""
     if "seatDisabled" in cls:
         return False
