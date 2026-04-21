@@ -13,20 +13,28 @@ class ScheduleMonitor:
             config.get("notifications", {}).get("discord_webhook_url", "")
         )
         self._opened: dict[str, bool] = {}
+        # 사이트별 마지막 요청 시간
+        self._last_request: dict[str, float] = {}
 
     def _remaining_targets(self) -> list[dict]:
         return [t for t in self.targets if not self._opened.get(t["name"])]
 
-    def _sleep_interval(self) -> float:
-        if not self._remaining_targets():
-            return 0
-        return 60 / self.max_rpm
+    def _wait_for_rate_limit(self, typ: str):
+        """사이트별 RPM 제한을 지키도록 대기합니다."""
+        min_interval = 60 / self.max_rpm
+        last = self._last_request.get(typ, 0)
+        elapsed = time.time() - last
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        self._last_request[typ] = time.time()
 
     def run(self):
         n = len(self.targets)
-        interval = max(30, 60 * n / self.max_rpm)
-        print(f"모니터링 시작: {n}개 타겟, 요청 간격 {interval:.0f}초 "
-              f"(분당 최대 {self.max_rpm}회)")
+        cgv_count = sum(1 for t in self.targets if t.get("type", "cgv") == "cgv")
+        mega_count = sum(1 for t in self.targets if t.get("type") == "megabox")
+        print(f"모니터링 시작: {n}개 타겟 "
+              f"(CGV {cgv_count}개, 메가박스 {mega_count}개), "
+              f"사이트별 분당 최대 {self.max_rpm}회")
         for t in self.targets:
             typ = t.get("type", "cgv").upper()
             print(f"  - [{typ}] {t['name']} | {t['date']} | "
@@ -39,6 +47,8 @@ class ScheduleMonitor:
                 if self._opened.get(target["name"]):
                     continue
 
+                typ = target.get("type", "cgv").lower()
+                self._wait_for_rate_limit(typ)
                 self._poll(target)
 
                 if not self._remaining_targets():
@@ -50,8 +60,6 @@ class ScheduleMonitor:
                         {"complete": True},
                     )
                     return
-
-                time.sleep(self._sleep_interval())
 
     def _poll(self, target: dict):
         name = target["name"]
