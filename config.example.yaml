@@ -1,30 +1,22 @@
-# CGV IMAX 예매 오픈 모니터 설정
+# 예매 오픈 모니터 설정
 max_requests_per_minute: 4
 
 notifications:
   discord_webhook_url: ""
 
-# 모니터링 대상
-# date: 확인할 날짜 (YYYYMMDD)
-# movie_filter: 영화명 키워드 (일부만 적어도 됨)
-# screen_filter: 상영관 타입 (IMAX, 4DX 등)
 targets:
+  # CGV
   - name: "용산 IMAX 헤일메리 4/20"
+    type: cgv
     site_no: "0013"
-    date: "20260416"
-    screen_filter: "IMAX"
-    movie_filter: "헤일메리"
-
-  - name: "센텀 IMAX 헤일메리 4/20"
-    site_no: "0089"
     date: "20260420"
     screen_filter: "IMAX"
     movie_filter: "헤일메리"
 
-# 영화관 코드
-# 0013: 용산아이파크몰
-# 0089: 센텀시티
-# 0059: 영등포
-# 0074: 왕십리
-# 0105: 여의도
-# 0088: 서면
+  # 메가박스
+  - name: "코엑스 DOLBY 헤일메리 5/1"
+    type: megabox
+    branch_no: "1351"
+    date: "20260501"
+    screen_filter: "DOLBY"
+    movie_filter: "헤일메리"
