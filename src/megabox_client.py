@@ -53,7 +53,10 @@ def fetch_schedule(branch_no: str, date: str) -> list[dict]:
         timeout=15,
     )
     resp.raise_for_status()
-    return resp.json().get("movieFormList") or []
+    schedules = resp.json().get("movieFormList")
+    if not isinstance(schedules, list):
+        return []
+    return schedules
 
 
 def filter_screen(schedules: list[dict], screen_filter: str) -> list[dict]:
@@ -63,5 +66,6 @@ def filter_screen(schedules: list[dict], screen_filter: str) -> list[dict]:
     keyword = screen_filter.upper()
     return [
         s for s in schedules
-        if keyword in (s.get("theabExpoNm", "") or "").upper()
+        if isinstance(s, dict)
+        and keyword in (s.get("theabExpoNm", "") or "").upper()
     ]

@@ -2,19 +2,27 @@ import time
 from datetime import datetime
 
 from src import cgv_client, megabox_client
-from src.notifier import notify_console, notify_discord
+from src.notifier import notify_console, notify_discord, notify_heartbeat
+
+HEARTBEAT_INTERVAL = 3600  # 1시간
 
 
 class ScheduleMonitor:
     def __init__(self, config: dict):
         self.targets = config["targets"]
         self.max_rpm = config.get("max_requests_per_minute", 2)
-        self.discord_webhook = (
-            config.get("notifications", {}).get("discord_webhook_url", "")
+        notif = config.get("notifications", {})
+        self.discord_webhook = notif.get("discord_webhook_url", "")
+        # 하트비트 전용 웹훅 (없으면 알림 웹훅으로 폴백)
+        self.heartbeat_webhook = (
+            notif.get("heartbeat_webhook_url") or self.discord_webhook
         )
         self._opened: dict[str, bool] = {}
         # 사이트별 마지막 요청 시간
         self._last_request: dict[str, float] = {}
+        self._start_time = time.time()
+        self._last_heartbeat = time.time()
+        self._last_check: str | None = None
 
     def _remaining_targets(self) -> list[dict]:
         return [t for t in self.targets if not self._opened.get(t["name"])]
@@ -42,6 +50,10 @@ class ScheduleMonitor:
                   f"{t.get('movie_filter', '전체')}")
         print()
 
+        # 시작 즉시 한 번 상태 전송 (웹훅 정상 여부 확인용)
+        notify_heartbeat(self.heartbeat_webhook, self._build_status())
+        self._last_heartbeat = time.time()
+
         while True:
             for target in self.targets:
                 if self._opened.get(target["name"]):
@@ -49,7 +61,11 @@ class ScheduleMonitor:
 
                 typ = target.get("type", "cgv").lower()
                 self._wait_for_rate_limit(typ)
-                self._poll(target)
+                try:
+                    self._poll(target)
+                except Exception as e:
+                    now = datetime.now().strftime("%H:%M:%S")
+                    print(f"[{now}] {target['name']}: 예기치 못한 오류 - {e}")
 
                 if not self._remaining_targets():
                     now = datetime.now().strftime("%H:%M:%S")
@@ -61,6 +77,28 @@ class ScheduleMonitor:
                     )
                     return
 
+            # 1시간마다 살아있음 알림
+            if time.time() - self._last_heartbeat >= HEARTBEAT_INTERVAL:
+                notify_heartbeat(self.heartbeat_webhook, self._build_status())
+                self._last_heartbeat = time.time()
+
+    def _build_status(self) -> dict:
+        return {
+            "targets": [
+                {
+                    "name": t["name"],
+                    "type": t.get("type", "cgv"),
+                    "date": t["date"],
+                    "screen": t.get("screen_filter", ""),
+                    "movie": t.get("movie_filter", ""),
+                    "opened": bool(self._opened.get(t["name"])),
+                }
+                for t in self.targets
+            ],
+            "last_check": self._last_check,
+            "uptime_sec": time.time() - self._start_time,
+        }
+
     def _poll(self, target: dict):
         name = target["name"]
         date = target["date"]
@@ -68,6 +106,7 @@ class ScheduleMonitor:
         movie_filter = target.get("movie_filter", "")
         typ = target.get("type", "cgv").lower()
         now = datetime.now().strftime("%H:%M:%S")
+        self._last_check = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         try:
             if typ == "megabox":
@@ -99,12 +138,14 @@ class ScheduleMonitor:
             if typ == "megabox":
                 schedules = [
                     s for s in schedules
-                    if keyword in (s.get("movieNm", "") or "").upper()
+                    if isinstance(s, dict)
+                    and keyword in (s.get("movieNm", "") or "").upper()
                 ]
             else:
                 schedules = [
                     s for s in schedules
-                    if keyword in (s.get("movNm", "") or "").upper()
+                    if isinstance(s, dict)
+                    and keyword in (s.get("movNm", "") or "").upper()
                 ]
 
         if schedules:

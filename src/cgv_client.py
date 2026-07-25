@@ -45,7 +45,11 @@ def fetch_schedule(site_no: str, date: str) -> list[dict]:
         "/cnm/atkt/searchMovScnInfo",
         {"coCd": "A420", "siteNo": site_no, "scnYmd": date, "rtctlScopCd": "08"},
     )
-    return data.get("data", [])
+    schedules = data.get("data")
+    # API가 간헐적으로 data를 리스트가 아닌 형태(문자열/None 등)로 반환할 수 있음
+    if not isinstance(schedules, list):
+        return []
+    return schedules
 
 
 def filter_screen(schedules: list[dict], screen_filter: str) -> list[dict]:
@@ -55,6 +59,9 @@ def filter_screen(schedules: list[dict], screen_filter: str) -> list[dict]:
     keyword = screen_filter.upper()
     return [
         s for s in schedules
-        if keyword in (s.get("scnsNm", "") or "").upper()
-        or keyword in (s.get("expoScnsNm", "") or "").upper()
+        if isinstance(s, dict)
+        and (
+            keyword in (s.get("scnsNm", "") or "").upper()
+            or keyword in (s.get("expoScnsNm", "") or "").upper()
+        )
     ]
