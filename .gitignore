@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .claude/
 config.yaml
+*.log
+.watchdog_alerted
