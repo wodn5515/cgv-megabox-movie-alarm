@@ -120,10 +120,18 @@ def notify_cancel(notif: dict, target_name: str, info: dict):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     seats_str = ", ".join(info.get("seats") or [])
     headline = f"{info['date']} {info['time']} · {info['movie']} · {info['screen']}"
-    counts = f"잔여 {info['free']}/{info['total']}석 (신규 {info['gained']}석)"
+    repeat = bool(info.get("repeat"))
+    if repeat:
+        title = "아직 열려 있음"
+        icon = "🔁"
+        counts = f"잔여 {info['free']}/{info['total']}석"
+    else:
+        title = "취소표 발생!"
+        icon = "🎟️"
+        counts = f"잔여 {info['free']}/{info['total']}석 (신규 {info['gained']}석)"
 
     print(f"\n{'='*60}")
-    print(f"[{now}] 취소표 발생! {target_name}")
+    print(f"[{now}] {title} {target_name}")
     print(f"  {headline}")
     print(f"  {counts}")
     if seats_str:
@@ -132,12 +140,14 @@ def notify_cancel(notif: dict, target_name: str, info: dict):
 
     discord_lines = [
         "@here",
-        f"🎟️ **취소표 발생! — {target_name}**",
+        f"{icon} **{title} — {target_name}**",
         headline,
-        f"잔여 **{info['free']}**/{info['total']}석 (신규 {info['gained']}석)",
+        counts.replace(
+            f"{info['free']}/", f"**{info['free']}**/", 1
+        ),
     ]
     telegram_lines = [
-        f"🎟️ 취소표 발생! — {target_name}",
+        f"{icon} {title} — {target_name}",
         headline,
         counts,
     ]

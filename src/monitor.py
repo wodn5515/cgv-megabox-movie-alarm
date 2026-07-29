@@ -57,6 +57,10 @@ class ScheduleMonitor:
         # 취소표 모드에서 회차별로 마지막에 본 빈자리 (좌석 라벨 집합 / 잔여 수)
         self._free_seats: dict[str, set[str]] = {}
         self._free_count: dict[str, int] = {}
+        # 회차별 마지막 알림 시각 (repeat_alert_sec 주기 계산용)
+        self._last_alert: dict[str, float] = {}
+        # 회차별 좌석 묶음 표기 ("K17~K18"). 반복 알림에서 재사용합니다.
+        self._free_desc: dict[str, list[str]] = {}
         # 사이트별 마지막 요청 시간
         self._last_request: dict[str, float] = {}
         # 영화관별 상영일 목록 캐시 (조회시각, 목록)
@@ -406,7 +410,9 @@ class ScheduleMonitor:
 
             if free <= 0:
                 self._free_seats[key] = set()
+                self._free_desc.pop(key, None)
                 self._free_count[key] = 0
+                self._last_alert.pop(key, None)
                 continue
 
             report.append(f"{_pretty_date(ymd)} {start} {free}/{total}")
@@ -415,25 +421,71 @@ class ScheduleMonitor:
                 # 배치도를 다시 받지 않습니다. 수가 움직일 때만 조회합니다.
                 prev_free = self._free_count.get(key)
                 self._free_count[key] = free
-                if prev_free is not None and prev_free == free:
-                    continue
-                self._check_seats(target, sch, key, start, seat_cfg, typ, ymd)
+                if prev_free is None or prev_free != free:
+                    self._check_seats(
+                        target, sch, key, start, seat_cfg, typ, ymd
+                    )
+                else:
+                    # 좌석 구성이 그대로라도, 조건에 맞는 자리가 아직 열려
+                    # 있으면 캐시된 좌석 목록으로 반복 알림을 보냅니다.
+                    self._repeat_alert(target, sch, key, start, typ, ymd)
             else:
                 self._check_count(
                     target, sch, key, start, free, total, typ, ymd
                 )
         return report
 
+    def _repeat_due(self, target: dict, key: str) -> bool:
+        """반복 알림을 보낼 때가 됐는지 확인합니다.
+
+        repeat_alert_sec이 없거나 0이면 반복하지 않습니다.
+        """
+        try:
+            interval = int(target.get("repeat_alert_sec") or 0)
+        except (TypeError, ValueError):
+            interval = 0
+        if interval <= 0:
+            return False
+        last = self._last_alert.get(key)
+        return last is None or time.time() - last >= interval
+
+    def _repeat_alert(self, target, sch, key, start, typ, ymd):
+        """이미 알린 자리가 아직 열려 있을 때 다시 알립니다."""
+        labels = self._free_seats.get(key)
+        if not labels or not self._repeat_due(target, key):
+            return
+
+        self._last_alert[key] = time.time()
+        self._hits += 1
+        notify_cancel(self.notif, target["name"], {
+            "date": _pretty_date(ymd),
+            "time": start,
+            "movie": sch.get("movNm", ""),
+            "screen": sch.get("scnsNm", ""),
+            "free": _int(sch.get("frSeatCnt")),
+            "total": _int(sch.get("stcnt")),
+            "gained": len(labels),
+            "seats": self._free_desc.get(key) or sorted(labels),
+            "url": _booking_url(sch, typ),
+            "repeat": True,
+        })
+
     def _check_count(
         self, target, sch, key, start, free, total, typ, ymd
     ):
-        """빈자리 수가 늘어났을 때 알립니다 (좌석 위치 조건이 없는 경우)."""
+        """빈자리 수가 늘어났을 때 알립니다 (좌석 위치 조건이 없는 경우).
+
+        빈자리가 남아 있는 동안에는 repeat_alert_sec 주기로 다시 알립니다.
+        """
         prev = self._free_count.get(key)
         self._free_count[key] = free
-        if prev is not None and free <= prev:
+        increased = prev is None or free > prev
+        repeat = not increased and self._repeat_due(target, key)
+        if not increased and not repeat:
             return
 
-        gained = free if prev is None else free - prev
+        gained = free if prev is None else max(free - prev, 0)
+        self._last_alert[key] = time.time()
         self._hits += 1
         notify_cancel(self.notif, target["name"], {
             "date": _pretty_date(ymd),
@@ -447,6 +499,7 @@ class ScheduleMonitor:
             "gained": gained,
             "seats": [],
             "url": _booking_url(sch, typ),
+            "repeat": repeat,
         })
 
     def _check_seats(self, target, sch, key, start, seat_cfg, typ, ymd):
@@ -462,13 +515,18 @@ class ScheduleMonitor:
         labels = {seat_filter.label(s) for g in groups for s in g}
         prev = self._free_seats.get(key, set())
         self._free_seats[key] = labels
+        self._free_desc[key] = seat_filter.describe(groups)
 
         new = labels - prev
         if not new:
+            # 새로 풀린 자리는 없지만, 이미 알린 자리가 아직 열려 있으면
+            # repeat_alert_sec 주기로 다시 알립니다.
+            self._repeat_alert(target, sch, key, start, typ, ymd)
             return
 
         # 새로 풀린 좌석이 포함된 묶음만 알립니다
         fresh = [g for g in groups if any(seat_filter.label(s) in new for s in g)]
+        self._last_alert[key] = time.time()
         self._hits += 1
         notify_cancel(self.notif, target["name"], {
             "date": _pretty_date(ymd),
