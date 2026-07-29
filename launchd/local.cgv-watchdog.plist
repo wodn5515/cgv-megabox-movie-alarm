@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.cgv-watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/move/Desktop/cj/cgv-imax-automation/venv/bin/python</string>
+        <string>-u</string>
+        <string>watchdog.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/move/Desktop/cj/cgv-imax-automation</string>
+
+    <!-- 5분마다 실행. watchdog.py는 monitor.log가 300초 넘게
+         갱신되지 않았는지 확인하고 경보를 보냅니다. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/move/Desktop/cj/cgv-imax-automation/watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/move/Desktop/cj/cgv-imax-automation/watchdog.log</string>
+</dict>
+</plist>

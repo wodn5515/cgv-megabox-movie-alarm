@@ -1,11 +1,18 @@
-# 예매 오픈 모니터 설정
+# 예매 모니터 설정
 max_requests_per_minute: 4
 
 notifications:
   discord_webhook_url: ""
+  heartbeat_webhook_url: ""   # 비우면 위 웹훅으로 폴백
+
+  # 텔레그램 푸시 (Discord보다 폰 도달이 빠릅니다)
+  # python3 telegram_setup.py <봇토큰> 을 돌리면 chat_id를 찾아줍니다.
+  telegram:
+    bot_token: ""
+    chat_id: ""
 
 targets:
-  # CGV
+  # 1) 예매 오픈 감시 (mode 생략 시 기본값)
   - name: "용산 IMAX 헤일메리 4/20"
     type: cgv
     site_no: "0013"
@@ -13,10 +20,27 @@ targets:
     screen_filter: "IMAX"
     movie_filter: "헤일메리"
 
-  # 메가박스
-  - name: "코엑스 DOLBY 헤일메리 5/1"
+  # 2) 취소표 감시 — 날짜 전체 + 요일별 시간대 + 좌석 위치 (CGV 전용)
+  - name: "용산 IMAX 오디세이 취소표"
+    type: cgv
+    site_no: "0013"
+    dates: all                      # 예매 열린 상영일 전체 (날짜 목록도 가능)
+    screen_filter: "IMAX"
+    movie_filter: "오디세이"
+    mode: cancel
+    time_rules:                     # 평일/주말을 나눠 지정 (공휴일은 주말 취급)
+      weekday: ["19:00", "23:59"]
+      weekend: ["12:00", "20:00"]
+    seats:                          # 좌석 조건 (생략하면 빈자리 수만 감시)
+      rows: ["K", "L", "M", "N"]    # 감시할 열
+      seat_no: [16, 29]             # 좌석 번호 범위
+      min_consecutive: 2            # 나란히 붙어있어야 하는 최소 좌석 수
+
+  # 3) 취소표 감시 — 메가박스는 잔여 좌석 "수"로만 감시
+  - name: "코엑스 DOLBY 헤일메리 5/1 취소표"
     type: megabox
     branch_no: "1351"
     date: "20260501"
     screen_filter: "DOLBY"
     movie_filter: "헤일메리"
+    mode: cancel
