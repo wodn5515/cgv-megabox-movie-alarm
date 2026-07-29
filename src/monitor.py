@@ -16,6 +16,10 @@ DATE_CACHE_TTL = 600
 # 조건에 맞는 회차가 없던 날짜를 건너뛰는 기간.
 # 아직 회차가 안 붙은 날짜에 회차가 생기는 순간이 좌석을 잡을 최적기라 짧게 잡습니다.
 EMPTY_DATE_TTL = 900
+# 잔여석 수가 그대로여도 이 주기마다는 좌석 배치도를 강제로 다시 받습니다.
+# 취소와 매수가 같은 바퀴에 상쇄되면 수가 안 변해 좌석 변화를 놓치는데,
+# 이 갱신이 최악의 누락 시간을 이 값으로 묶어줍니다.
+SEAT_REFRESH_TTL = 300
 
 
 def _start_time(schedule: dict, typ: str) -> str:
@@ -61,6 +65,8 @@ class ScheduleMonitor:
         self._last_alert: dict[str, float] = {}
         # 회차별 좌석 묶음 표기 ("K17~K18"). 반복 알림에서 재사용합니다.
         self._free_desc: dict[str, list[str]] = {}
+        # 회차별 마지막 좌석 배치도 조회 시각 (강제 갱신 주기 계산용)
+        self._last_seat_fetch: dict[str, float] = {}
         # 사이트별 마지막 요청 시간
         self._last_request: dict[str, float] = {}
         # 영화관별 상영일 목록 캐시 (조회시각, 목록)
@@ -413,6 +419,7 @@ class ScheduleMonitor:
                 self._free_desc.pop(key, None)
                 self._free_count[key] = 0
                 self._last_alert.pop(key, None)
+                self._last_seat_fetch.pop(key, None)
                 continue
 
             report.append(f"{_pretty_date(ymd)} {start} {free}/{total}")
@@ -421,7 +428,7 @@ class ScheduleMonitor:
                 # 배치도를 다시 받지 않습니다. 수가 움직일 때만 조회합니다.
                 prev_free = self._free_count.get(key)
                 self._free_count[key] = free
-                if prev_free is None or prev_free != free:
+                if prev_free is None or prev_free != free or self._refresh_due(key):
                     self._check_seats(
                         target, sch, key, start, seat_cfg, typ, ymd
                     )
@@ -434,6 +441,14 @@ class ScheduleMonitor:
                     target, sch, key, start, free, total, typ, ymd
                 )
         return report
+
+    def _refresh_due(self, key: str) -> bool:
+        """잔여석 수가 그대로여도 좌석 배치도를 다시 받을 때가 됐는지 확인합니다.
+
+        취소와 매수가 상쇄되어 수가 그대로인 경우를 잡기 위한 안전장치입니다.
+        """
+        last = self._last_seat_fetch.get(key)
+        return last is None or time.time() - last >= SEAT_REFRESH_TTL
 
     def _repeat_due(self, target: dict, key: str) -> bool:
         """반복 알림을 보낼 때가 됐는지 확인합니다.
@@ -510,6 +525,7 @@ class ScheduleMonitor:
         except Exception as e:
             print(f"  좌석 조회 실패 ({ymd} {start}) - {e}")
             return
+        self._last_seat_fetch[key] = time.time()
 
         groups = seat_filter.match(seats, seat_cfg)
         labels = {seat_filter.label(s) for g in groups for s in g}
