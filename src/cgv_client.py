@@ -52,6 +52,65 @@ def fetch_schedule(site_no: str, date: str) -> list[dict]:
     return schedules
 
 
+def fetch_screening_dates(site_no: str) -> list[dict]:
+    """예매 가능한 상영일 목록을 반환합니다.
+
+    [{"scnYmd": "20260805", "hldyYn": "N"}, ...] 형태이며
+    hldyYn이 "Y"면 공휴일입니다.
+    """
+    data = _get(
+        "/cnm/atkt/searchSiteScnscYmdListBySite",
+        {"coCd": "A420", "siteNo": site_no},
+    ).get("data")
+    if not isinstance(data, list):
+        return []
+    return [d for d in data if isinstance(d, dict) and d.get("scnYmd")]
+
+
+def fetch_seats(schedule: dict) -> list[dict]:
+    """특정 회차의 좌석 배치도를 평탄화하여 반환합니다.
+
+    schedule은 fetch_schedule이 돌려준 회차 dict를 그대로 넘깁니다.
+    """
+    data = _get(
+        "/cnm/atkt/searchIfSeatData",
+        {
+            "coCd": schedule.get("coCd", "A420"),
+            "siteNo": schedule.get("siteNo", ""),
+            "scnYmd": schedule.get("scnYmd", ""),
+            "scnsNo": schedule.get("scnsNo", ""),
+            "scnSseq": schedule.get("scnSseq", ""),
+            "movNo": schedule.get("movNo", ""),
+            "prodNo": schedule.get("prodNo", ""),
+        },
+    ).get("data")
+    if not isinstance(data, dict):
+        return []
+    items = data.get("items")
+    if not isinstance(items, list):
+        return []
+
+    seats: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        block = item.get("seats")
+        if isinstance(block, list):
+            seats.extend(s for s in block if isinstance(s, dict))
+    return seats
+
+
+def available_seats(seats: list[dict]) -> list[dict]:
+    """판매 가능한(아직 아무도 안 잡은) 좌석만 남깁니다.
+
+    seatStusCd: 00=미정(빈자리), 01=판매됨
+    """
+    return [
+        s for s in seats
+        if s.get("seatStusCd") == "00" and s.get("seatSaleYn") == "Y"
+    ]
+
+
 def filter_screen(schedules: list[dict], screen_filter: str) -> list[dict]:
     """특정 상영관 타입으로 필터링합니다."""
     if not screen_filter:

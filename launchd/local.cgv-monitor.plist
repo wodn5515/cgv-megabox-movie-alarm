@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.cgv-monitor</string>
+
+    <!-- -u: 출력 버퍼링을 끕니다. 빼면 monitor.log가 늦게 갱신돼
+         워치독이 "멈춤"으로 오탐합니다. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/move/Desktop/cj/cgv-imax-automation/venv/bin/python</string>
+        <string>-u</string>
+        <string>main.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/move/Desktop/cj/cgv-imax-automation</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 비정상 종료(크래시)일 때만 재시작합니다.
+         모든 타겟을 감지하고 정상 종료한 경우에는 다시 띄우지 않습니다. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- 재시작 폭주 방지 -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/move/Desktop/cj/cgv-imax-automation/monitor.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/move/Desktop/cj/cgv-imax-automation/monitor.log</string>
+</dict>
+</plist>

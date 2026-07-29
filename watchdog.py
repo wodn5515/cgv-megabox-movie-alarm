@@ -1,7 +1,8 @@
 """모니터와 별개로 도는 감시자(워치독).
 
 monitor.log가 일정 시간 갱신되지 않으면 = 모니터가 죽거나 멈춘 것으로 보고
-Discord로 경보를 보낸다. 복구되면 복구 알림을 한 번 보낸다.
+하트비트 채널로 경보를 보낸다. 복구되면 복구 알림을 한 번 보낸다.
+모니터 운영 관련 알림이므로 텔레그램·알림 웹훅으로는 보내지 않는다.
 (launchd에서 몇 분마다 한 번씩 실행되는 것을 전제로 함.)
 """
 import os
@@ -12,24 +13,32 @@ import yaml
 import requests
 
 PROJECT = os.path.dirname(os.path.abspath(__file__))
+
 LOG = os.path.join(PROJECT, "monitor.log")
 CONFIG = os.path.join(PROJECT, "config.yaml")
 STATE = os.path.join(PROJECT, ".watchdog_alerted")  # 이미 경보 보냈는지 표시
 STALE_SEC = 300  # 로그가 이 시간(초) 넘게 안 바뀌면 죽은 것으로 판단
 
 
-def load_webhook() -> str:
+def load_notif() -> dict:
     try:
         with open(CONFIG, "r", encoding="utf-8") as f:
             c = yaml.safe_load(f) or {}
     except Exception:
-        return ""
-    n = c.get("notifications", {})
-    return n.get("heartbeat_webhook_url") or n.get("discord_webhook_url") or ""
+        return {}
+    return c.get("notifications", {}) or {}
 
 
-def send(webhook: str, dead: bool, detail: str):
+def send(notif: dict, dead: bool, detail: str):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 모니터 상태 관련 알림이므로 하트비트 채널로 보냅니다.
+    # 경보에는 @here 멘션이 붙어서 조용한 채널에서도 놓치지 않습니다.
+    webhook = (
+        notif.get("heartbeat_webhook_url")
+        or notif.get("discord_webhook_url")
+        or ""
+    )
+
     if not webhook:
         print(f"[{now}] (웹훅 없음) dead={dead} {detail}")
         return
@@ -58,7 +67,7 @@ def send(webhook: str, dead: bool, detail: str):
 
 
 def main():
-    webhook = load_webhook()
+    notif = load_notif()
 
     if not os.path.exists(LOG):
         dead, detail, age = True, "monitor.log 없음 — 모니터가 시작된 적 없음", None
@@ -79,10 +88,10 @@ def main():
 
     already = os.path.exists(STATE)
     if dead and not already:
-        send(webhook, True, detail)
+        send(notif, True, detail)
         open(STATE, "w").close()
     elif not dead and already:
-        send(webhook, False, "폴링 로그가 다시 갱신되고 있습니다.")
+        send(notif, False, "폴링 로그가 다시 갱신되고 있습니다.")
         os.remove(STATE)
 
 
