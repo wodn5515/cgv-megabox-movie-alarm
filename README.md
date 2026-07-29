@@ -185,11 +185,15 @@ CGV는 심야 상영을 `24:00`, `25:00`처럼 표기합니다 (25:00 = 다음�
 직접 띄우기:
 
 ```bash
-nohup ./venv/bin/python -u main.py > monitor.log 2>&1 &
+mkdir -p ~/Library/Logs/cgv-monitor
+nohup ./venv/bin/python -u main.py > ~/Library/Logs/cgv-monitor/monitor.log 2>&1 &
 ```
 
-`-u`가 없으면 파이썬이 출력을 버퍼링해서 `monitor.log`가 늦게 갱신되고,
+`-u`가 없으면 파이썬이 출력을 버퍼링해서 로그가 늦게 갱신되고,
 워치독이 "모니터 멈춤"으로 오탐합니다.
+
+로그 위치는 `~/Library/Logs/cgv-monitor/` 로 고정입니다. 워치독이 같은 경로를
+보고 생사를 판단하므로 다른 곳으로 바꾸지 마세요.
 
 ### launchd로 상시 실행 (권장)
 
@@ -199,6 +203,7 @@ nohup ./venv/bin/python -u main.py > monitor.log 2>&1 &
 ```bash
 ./launchd/manage.sh install     # 설치 + 시작
 ./launchd/manage.sh status      # 동작 확인
+./launchd/manage.sh logs        # 로그 실시간 보기
 ./launchd/manage.sh restart     # config.yaml 수정 후 반영
 ./launchd/manage.sh stop        # 중지 (모니터 + 워치독 함께)
 ./launchd/manage.sh uninstall   # 완전 제거
@@ -216,6 +221,21 @@ nohup ./venv/bin/python -u main.py > monitor.log 2>&1 &
 살아남아서 "모니터가 멈췄다"고 경보를 보냅니다.
 
 `config.yaml`은 시작할 때 한 번만 읽으므로, 수정 후에는 `restart`가 필요합니다.
+
+### 로그를 프로젝트 폴더에 두면 안 되는 이유
+
+`~/Desktop`, `~/Documents`, `~/Downloads` 아래에 프로젝트가 있으면
+launchd가 그곳의 **기존 로그 파일**을 stdout으로 열지 못하고
+`EX_CONFIG (78)`로 죽습니다. 프로세스는 pid만 받고 아무것도 출력하지 못한 채
+사라지므로 원인을 찾기가 어렵습니다.
+
+```bash
+launchctl print gui/$UID/local.cgv-monitor | grep "last exit"
+#   last exit code = 78: EX_CONFIG
+```
+
+그래서 로그를 `~/Library/Logs/cgv-monitor/` 에 둡니다. 이 경로는 보호 대상이
+아니라서 문제가 생기지 않습니다.
 
 ## 알림 설정
 

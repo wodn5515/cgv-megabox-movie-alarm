@@ -7,10 +7,12 @@
 #   ./launchd/manage.sh stop        중지
 #   ./launchd/manage.sh restart     재시작 (config.yaml 수정 후 반영용)
 #   ./launchd/manage.sh status      동작 상태 확인
+#   ./launchd/manage.sh logs        모니터 로그 실시간 보기
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENTS="$HOME/Library/LaunchAgents"
+LOGDIR="$HOME/Library/Logs/cgv-monitor"
 LABELS=(local.cgv-monitor local.cgv-watchdog)
 
 boot_out() {
@@ -23,7 +25,7 @@ boot_in() {
 
 case "${1:-}" in
 install)
-    mkdir -p "$AGENTS"
+    mkdir -p "$AGENTS" "$LOGDIR"
     for l in "${LABELS[@]}"; do
         boot_out "$l"
         cp "$HERE/$l.plist" "$AGENTS/$l.plist"
@@ -31,7 +33,10 @@ install)
         echo "설치됨: $l"
     done
     echo
-    echo "로그: tail -f $(dirname "$HERE")/monitor.log"
+    echo "로그: $0 logs"
+    ;;
+logs)
+    tail -f "$LOGDIR/monitor.log"
     ;;
 uninstall)
     for l in "${LABELS[@]}"; do
@@ -64,7 +69,7 @@ status)
     done
     ;;
 *)
-    sed -n '2,11p' "$0"
+    sed -n '2,12p' "$0"
     exit 1
     ;;
 esac
