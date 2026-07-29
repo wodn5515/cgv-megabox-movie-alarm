@@ -25,8 +25,8 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/move/Desktop/cj/cgv-imax-automation/watchdog.log</string>
+    <string>/Users/move/Library/Logs/cgv-monitor/watchdog.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/move/Desktop/cj/cgv-imax-automation/watchdog.log</string>
+    <string>/Users/move/Library/Logs/cgv-monitor/watchdog.log</string>
 </dict>
 </plist>

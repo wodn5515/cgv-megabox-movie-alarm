@@ -7,7 +7,12 @@
     <string>local.cgv-monitor</string>
 
     <!-- -u: 출력 버퍼링을 끕니다. 빼면 monitor.log가 늦게 갱신돼
-         워치독이 "멈춤"으로 오탐합니다. -->
+         워치독이 "멈춤"으로 오탐합니다.
+
+         로그를 ~/Library/Logs 아래 두는 이유:
+         프로젝트가 Desktop/Documents 같은 보호된 위치에 있으면
+         launchd가 그곳의 기존 파일을 stdout으로 열지 못하고
+         EX_CONFIG(78)로 죽습니다. -->
     <key>ProgramArguments</key>
     <array>
         <string>/Users/move/Desktop/cj/cgv-imax-automation/venv/bin/python</string>
@@ -34,8 +39,8 @@
     <integer>30</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/move/Desktop/cj/cgv-imax-automation/monitor.log</string>
+    <string>/Users/move/Library/Logs/cgv-monitor/monitor.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/move/Desktop/cj/cgv-imax-automation/monitor.log</string>
+    <string>/Users/move/Library/Logs/cgv-monitor/monitor.log</string>
 </dict>
 </plist>

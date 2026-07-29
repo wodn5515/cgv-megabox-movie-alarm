@@ -14,7 +14,11 @@ import requests
 
 PROJECT = os.path.dirname(os.path.abspath(__file__))
 
-LOG = os.path.join(PROJECT, "monitor.log")
+# 로그는 프로젝트 폴더가 아니라 ~/Library/Logs 아래에 둔다.
+# 프로젝트가 Desktop/Documents 같은 보호된 위치에 있으면 launchd가
+# 그곳의 기존 파일을 stdout으로 열지 못해 EX_CONFIG(78)로 죽는다.
+LOG_DIR = os.path.expanduser("~/Library/Logs/cgv-monitor")
+LOG = os.path.join(LOG_DIR, "monitor.log")
 CONFIG = os.path.join(PROJECT, "config.yaml")
 STATE = os.path.join(PROJECT, ".watchdog_alerted")  # 이미 경보 보냈는지 표시
 STALE_SEC = 300  # 로그가 이 시간(초) 넘게 안 바뀌면 죽은 것으로 판단
