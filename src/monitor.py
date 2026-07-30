@@ -112,24 +112,12 @@ class ScheduleMonitor:
               f"(CGV {cgv_count}개, 메가박스 {mega_count}개), "
               f"사이트별 분당 최대 {self.max_rpm}회")
         for t in self.targets:
-            typ = t.get("type", "cgv").upper()
-            mode = "취소표" if t.get("mode", "open") == "cancel" else "예매오픈"
-            desc = (f"  - [{typ}/{mode}] {t['name']} | {self._date_desc(t)} | "
-                    f"{t.get('screen_filter', '전체')} | "
-                    f"{t.get('movie_filter', '전체')}")
-            if t.get("time_rules"):
-                rules = t["time_rules"]
-                bits = [
-                    f"{ko}={r[0]}~{r[1]}"
-                    for key, ko in (("weekday", "평일"), ("weekend", "주말"))
-                    if (r := rules.get(key))
-                ]
-                desc += " | " + " ".join(bits)
-            elif t.get("time_range"):
-                desc += f" | {t['time_range'][0]}~{t['time_range'][1]}"
-            if t.get("seats"):
-                desc += f" | 좌석 {self._seat_desc(t['seats'])}"
-            print(desc)
+            # 시작 요약은 장식입니다. 설정 오타 때문에 여기서 죽으면
+            # launchd가 30초마다 재시작하는 크래시 루프가 됩니다.
+            try:
+                print(self._target_desc(t))
+            except Exception as e:
+                print(f"  - {t.get('name', '(이름 없음)')}: 설정 요약 실패 - {e}")
         print()
 
         # 시작 즉시 한 번 상태 전송 (웹훅 정상 여부 확인용)
@@ -160,6 +148,31 @@ class ScheduleMonitor:
                 notify_heartbeat(self.notif, self._build_status())
                 self._last_heartbeat = time.time()
 
+    def _target_desc(self, t: dict) -> str:
+        """시작할 때 보여줄 타겟 한 줄 요약."""
+        typ = t.get("type", "cgv").upper()
+        mode = "취소표" if t.get("mode", "open") == "cancel" else "예매오픈"
+        desc = (f"  - [{typ}/{mode}] {t.get('name', '(이름 없음)')} | "
+                f"{self._date_desc(t)} | "
+                f"{t.get('screen_filter', '전체')} | "
+                f"{t.get('movie_filter', '전체')}")
+        if t.get("time_rules"):
+            rules = t["time_rules"]
+            bits = [
+                f"{ko}={r[0]}~{r[1]}"
+                for key, ko in (("weekday", "평일"), ("weekend", "주말"))
+                if (r := rules.get(key)) and len(r) >= 2
+            ]
+            if bits:
+                desc += " | " + " ".join(bits)
+        elif (tr := t.get("time_range")) and len(tr) >= 2:
+            desc += f" | {tr[0]}~{tr[1]}"
+        if t.get("seats"):
+            desc += f" | 좌석 {self._seat_desc(t['seats'])}"
+        if t.get("auto_book"):
+            desc += " | 자동예매" + ("+결제" if t.get("auto_pay") else "")
+        return desc
+
     @staticmethod
     def _date_desc(target: dict) -> str:
         spec = target.get("dates", target.get("date"))
@@ -176,8 +189,13 @@ class ScheduleMonitor:
         parts = []
         if seats.get("rows"):
             parts.append(f"{'/'.join(str(r) for r in seats['rows'])}열")
-        if seats.get("seat_no"):
-            parts.append(f"{seats['seat_no'][0]}~{seats['seat_no'][1]}번")
+        lo, hi = seat_filter.seat_range(seats.get("seat_no"))
+        if lo is not None and hi is not None:
+            parts.append(f"{lo}~{hi}번")
+        elif lo is not None:
+            parts.append(f"{lo}번 이상")
+        elif hi is not None:
+            parts.append(f"{hi}번 이하")
         if (seats.get("min_consecutive") or 1) > 1:
             parts.append(f"{seats['min_consecutive']}연석")
         return " ".join(parts) or "전체"
