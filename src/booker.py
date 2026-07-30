@@ -15,6 +15,8 @@
     python3 -m src.booker 0013 20260815 1800 오디세이 IMAX 00100100090001
 """
 import json
+import os
+import re
 import sys
 import time
 
@@ -291,8 +293,78 @@ PAY_URL_PART = "mpy/main"
 KAKAO_HOST = "kakaopay.com"
 
 
+def kakao_identity(cfg: dict | None = None) -> dict:
+    """카톡결제 요청에 넣을 휴대폰번호·생년월일을 읽습니다.
+
+    config.yaml의 kakaopay 블록을 먼저 보고, 없으면 환경변수를 씁니다.
+
+        kakaopay:
+          phone: "01012345678"
+          birth: "900101"        # YYMMDD 6자리
+
+        CGV_KAKAO_PHONE / CGV_KAKAO_BIRTH
+
+    개인정보이므로 config.yaml은 .gitignore에 있어야 합니다.
+    """
+    cfg = cfg or {}
+    phone = str(cfg.get("phone") or os.environ.get("CGV_KAKAO_PHONE", ""))
+    birth = str(cfg.get("birth") or os.environ.get("CGV_KAKAO_BIRTH", ""))
+    phone = re.sub(r"\D", "", phone)
+    birth = re.sub(r"\D", "", birth)
+    return {"phone": phone, "birth": birth}
+
+
+def _mask(value: str) -> str:
+    """로그에 개인정보를 그대로 남기지 않습니다."""
+    if len(value) <= 4:
+        return "*" * len(value)
+    return value[:3] + "*" * (len(value) - 5) + value[-2:]
+
+
+def _kakao_handoff(tab, identity: dict) -> bool:
+    """카카오페이 화면에서 승인 수단을 준비하고 멈춥니다.
+
+    휴대폰번호·생년월일이 설정돼 있으면 '카톡결제'로 결제요청을 보냅니다.
+    카카오톡으로 요청이 도착하므로 컴퓨터 앞에 없어도 승인할 수 있습니다.
+    없으면 'QR결제' 탭을 띄워 스캔하도록 둡니다.
+
+    어느 쪽이든 최종 승인은 사용자가 폰에서 합니다.
+    """
+    phone, birth = identity.get("phone", ""), identity.get("birth", "")
+
+    if not (phone and birth):
+        if tab.click(js_by_text("QR결제", tags="button, a, li, span, div"),
+                     wait=1.5, retries=1):
+            _log("카카오페이 QR이 표시되었습니다. 폰으로 스캔해 승인하세요.")
+        else:
+            _log("카카오페이 결제 화면입니다 (QR결제/카톡결제를 직접 고르세요).")
+        _log("(여기서 멈춥니다. 결제 승인은 진행하지 않습니다.)")
+        return True
+
+    if not tab.click(js_by_text("카톡결제", tags="button, a, li, span, div"),
+                     wait=2.5):
+        _log("카톡결제 탭을 열지 못했습니다. 화면에서 직접 진행하세요.")
+        return True
+
+    ok_phone = tab.type_into("#phoneNumber", phone)
+    ok_birth = tab.type_into("#dateOfBirth", birth)
+    if not (ok_phone and ok_birth):
+        _log(f"입력 실패 (휴대폰 {ok_phone}, 생년월일 {ok_birth}). "
+             f"화면에서 직접 입력하세요.")
+        return True
+    _log(f"카톡결제 정보 입력: {_mask(phone)} / {_mask(birth)}")
+
+    if not tab.click(js_by_text("결제요청", tags="button"), wait=4.0):
+        _log("결제요청을 보내지 못했습니다. 화면에서 직접 눌러주세요.")
+        return True
+
+    _log("카카오톡으로 결제요청을 보냈습니다. 카톡에서 승인하세요.")
+    _log("(여기서 멈춥니다. 결제 승인은 진행하지 않습니다.)")
+    return True
+
+
 def _to_payment_qr(tab, schedule: dict, seats: int,
-                   expect_amount: int | None) -> bool:
+                   expect_amount: int | None, identity: dict) -> bool:
     """결제 페이지로 넘어가 카카오페이 QR까지 띄우고 멈춥니다.
 
     QR은 사용자가 폰으로 스캔해 승인해야 결제가 완료됩니다.
@@ -362,9 +434,8 @@ def _to_payment_qr(tab, schedule: dict, seats: int,
     for _ in range(15):
         url = tab.ev("location.href") or ""
         if KAKAO_HOST in url:
-            _log("카카오페이 QR이 표시되었습니다. 폰으로 스캔해 승인하세요.")
-            _log("(여기서 멈춥니다. 결제 승인은 진행하지 않습니다.)")
-            return True
+            time.sleep(1.5)
+            return _kakao_handoff(tab, identity)
         time.sleep(1.0)
 
     _log("카카오페이 화면으로 넘어가지 못했습니다. 브라우저를 확인하세요.")
@@ -374,7 +445,8 @@ def _to_payment_qr(tab, schedule: dict, seats: int,
 def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
          screen_filter: str = "", count: int | None = None,
          port: int = 9222, pay: bool = False,
-         expect_amount: int | None = None) -> bool:
+         expect_amount: int | None = None,
+         kakao: dict | None = None) -> bool:
     """예매 화면을 열어 좌석 선택까지 진행합니다. 결제는 하지 않습니다.
 
     schedule: 모니터가 받은 회차 dict (siteNm, scnYmd, scnsrtTm, movNm 등)
@@ -488,7 +560,8 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
                  f"결제는 직접 진행하세요.")
             return True
 
-        return _to_payment_qr(tab, schedule, len(picked), expect_amount)
+        return _to_payment_qr(tab, schedule, len(picked), expect_amount,
+                              kakao_identity(kakao))
 
     except Exception as e:
         _log(f"진행 중 오류 - {e}")

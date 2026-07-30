@@ -10,6 +10,7 @@ navigator.webdriver도 false로 유지됩니다.
       --remote-debugging-port=9222
 """
 import json
+import re
 import time
 
 import requests
@@ -135,6 +136,38 @@ class Tab:
                 return True
             time.sleep(1.0 + attempt)
         return False
+
+    def type_into(self, css: str, value: str, wait: float = 0.6) -> bool:
+        """입력란을 눌러 포커스를 준 뒤 실제 입력 이벤트로 값을 넣습니다.
+
+        React가 관리하는 입력란은 value를 직접 대입해도 상태가 갱신되지
+        않습니다. Input.insertText는 실제 타이핑과 같은 이벤트를 만듭니다.
+        """
+        spot = self.locate(
+            f"const el = document.querySelector({json.dumps(css)});"
+            " return el ? [el] : null;"
+        )
+        if not spot:
+            return False
+        self.click_point(spot["x"], spot["y"])
+        time.sleep(0.2)
+        # 기존 값 제거 후 입력
+        self.ev(f"""
+          (() => {{
+            const el = document.querySelector({json.dumps(css)});
+            if (el) {{ el.focus(); el.setSelectionRange(0, el.value.length); }}
+          }})()
+        """)
+        self.send("Input.insertText", text=value)
+        time.sleep(wait)
+        # 휴대폰번호처럼 입력 중 자동 서식되는 칸이 있어(010-0000-0000)
+        # 원문 비교가 아니라 영숫자만 남겨 비교합니다.
+        actual = self.ev(
+            f"(() => {{ const el = document.querySelector({json.dumps(css)});"
+            f" return el ? el.value : ''; }})()"
+        ) or ""
+        keep = re.compile(r"[^0-9A-Za-z]")
+        return keep.sub("", actual) == keep.sub("", value)
 
     def text(self) -> str:
         return self.ev("document.body.innerText") or ""

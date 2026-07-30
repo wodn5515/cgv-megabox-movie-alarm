@@ -52,3 +52,12 @@ targets:
     screen_filter: "DOLBY"
     movie_filter: "헤일메리"
     mode: cancel
+
+# 카톡결제 요청에 쓸 정보 (auto_pay: true 인 경우)
+# 채워두면 QR 대신 카카오톡으로 결제요청이 와서, 컴퓨터 앞에 없어도 승인 가능합니다.
+# 비워두면 QR결제 탭을 띄웁니다.
+# 개인정보입니다. config.yaml은 .gitignore에 있어야 합니다.
+# 환경변수 CGV_KAKAO_PHONE / CGV_KAKAO_BIRTH 로도 지정할 수 있습니다.
+kakaopay:
+  phone: ""      # 01012345678
+  birth: ""      # YYMMDD 6자리
