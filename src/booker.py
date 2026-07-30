@@ -296,13 +296,22 @@ KAKAO_HOST = "kakaopay.com"
 def kakao_identity(cfg: dict | None = None) -> dict:
     """카톡결제 요청에 넣을 휴대폰번호·생년월일을 읽습니다.
 
-    config.yaml의 kakaopay 블록을 먼저 보고, 없으면 환경변수를 씁니다.
+    타겟별 kakaopay → 전역 kakaopay → 환경변수 순으로 찾습니다.
 
-        kakaopay:
+        kakaopay:                  # 전역 기본값
           phone: "01012345678"
-          birth: "900101"        # YYMMDD 6자리
+          birth: "900101"          # YYMMDD 6자리
+
+        targets:
+          - name: "..."
+            kakaopay:              # 이 타겟만 다른 사람에게 (선택)
+              phone: "..."
+              birth: "..."
 
         CGV_KAKAO_PHONE / CGV_KAKAO_BIRTH
+
+    생년월일은 그 번호의 카카오페이 계정 본인 확인용입니다. 다른 사람에게
+    보내려면 그 사람의 생년월일이어야 하고, 결제도 그 사람이 하게 됩니다.
 
     개인정보이므로 config.yaml은 .gitignore에 있어야 합니다.
     """

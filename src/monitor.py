@@ -601,7 +601,8 @@ class ScheduleMonitor:
                     count=tickets,
                     pay=bool(target.get("auto_pay")),
                     expect_amount=target.get("expect_amount"),
-                    kakao=self.notif.get("kakaopay") or self.kakaopay,
+                    # 타겟별 설정이 있으면 그것을, 없으면 전역 설정을 씁니다.
+                    kakao=target.get("kakaopay") or self.kakaopay,
                 )
             except Exception as e:
                 print(f"  자동 예매 실패 - {e}")
