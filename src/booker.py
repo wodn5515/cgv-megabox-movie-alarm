@@ -27,6 +27,25 @@ HOME_URL = "https://cgv.co.kr/"
 VISITOR_URL_PART = "selectVisitorCnt"
 
 
+# 각 단계가 끝났는지 판정하는 JS 조건. 고정 sleep 대신 이것을 기다립니다.
+JS_THEATER_MODAL = ("[...document.querySelectorAll('.cgv-modal')]"
+                    ".filter(m=>m.offsetWidth||m.offsetHeight)"
+                    ".some(m=>(m.innerText||'').includes('지역별'))")
+JS_CONFIRM_BTN = ("[...document.querySelectorAll('.cgv-modal button')]"
+                  ".some(b=>(b.innerText||'').trim()==='극장선택')")
+JS_THEATER_OK = "!document.body.innerText.includes('선택 된 극장이 없습니다')"
+JS_MOVIE_LIST = ("[...document.querySelectorAll('.cgv-modal')]"
+                 ".filter(m=>m.offsetWidth||m.offsetHeight)"
+                 ".some(m=>m.querySelector('ul[class*=\"mvList\"] button'))")
+JS_DATES_READY = ("[...document.querySelectorAll('[class*=\"dayScroll_scrollItem\"]')]"
+                  ".some(e=>!/disabled/i.test((e.className||'').toString()))")
+JS_SHOWTIMES = "document.querySelectorAll('[class*=\"screenInfo_timeItem\"]').length>0"
+JS_SEATMAP_OPEN = ("(()=>{const c=document.querySelector('[class*=\"seatMap_container\"]');"
+                   "if(!c||getComputedStyle(c).visibility!=='visible')return false;"
+                   "return [...document.querySelectorAll('button[data-seatlocno]')]"
+                   ".some(e=>getComputedStyle(e).visibility!=='hidden');})()")
+
+
 def _log(msg: str):
     print(f"  [예매] {msg}", flush=True)
 
@@ -208,6 +227,37 @@ def _js_seat(seat_loc_no: str) -> str:
         .filter(e => !e.disabled)
         .filter(e => getComputedStyle(e).visibility !== 'hidden');
     """
+
+
+def _restriction_modal(tab) -> str:
+    """좌석 클릭 후 뜨는 예매 제한 안내를 읽습니다. 없으면 빈 문자열.
+
+    휠체어 전용석처럼 목록에는 '판매 가능'으로 나오지만 실제로는 일반
+    고객이 살 수 없는 좌석이 있습니다. 좌석 조회 API는 이런 좌석도
+    stkndCd=01(일반석)로 내려주므로 화면 안내로만 알 수 있습니다.
+    """
+    return tab.ev(r"""
+      (() => {
+        const m = [...document.querySelectorAll('.cgv-modal.active')]
+          .filter(e => e.offsetWidth || e.offsetHeight)
+          .find(e => /제한|불가|이용하실 수 없/.test(e.innerText || ''));
+        return m ? (m.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 80) : '';
+      })()
+    """) or ""
+
+
+def _dismiss_restriction(tab) -> bool:
+    """제한 안내 모달을 닫습니다."""
+    return tab.click(r"""
+      const norm = s => (s || '').trim().replace(/\s+/g, ' ');
+      const m = [...document.querySelectorAll('.cgv-modal.active')]
+        .filter(e => e.offsetWidth || e.offsetHeight)
+        .find(e => /제한|불가|이용하실 수 없/.test(e.innerText || ''));
+      if (!m) return null;
+      return [...m.querySelectorAll('button, a')]
+        .filter(e => ['확인', '닫기'].includes(norm(e.innerText)));
+    """, until="!document.querySelector('.cgv-modal.active')", timeout=4,
+        retries=2)
 
 
 def _selected_locnos(tab) -> list[str]:
@@ -493,81 +543,102 @@ def _kakao_handoff(tab, identity: dict, confirm_timeout: int = 300) -> bool:
     return _wait_and_confirm(tab, confirm_timeout)
 
 
-def _to_payment_qr(tab, schedule: dict, seats: int, identity: dict,
-                   confirm_timeout: int = 300) -> bool:
-    """결제 페이지로 넘어가 카카오페이 QR까지 띄우고 멈춥니다.
+# 버튼 innerText가 "21,000원\n결제하기" 처럼 줄바꿈을 포함하므로
+# 반드시 공백을 정규화한 뒤 비교해야 합니다.
+# 좌석 맵 모달이 열려 있는지. 이 모달 안에 '선택완료'가 있고, 그 뒤에
+# 가려진 'N원 결제하기'가 계속 존재하므로 결제 버튼 유무로는 판정할 수 없습니다.
+JS_SEATMAP_MODAL = (
+    "[...document.querySelectorAll('.cgv-modal.active')]"
+    ".filter(e=>e.offsetWidth||e.offsetHeight)"
+    ".some(e=>[...e.querySelectorAll('button')]"
+    ".some(b=>(b.innerText||'').trim()==='선택완료'))"
+)
 
-    QR은 사용자가 폰으로 스캔해 승인해야 결제가 완료됩니다.
-    QR이 뜬 뒤에는 아무것도 누르지 않습니다.
+JS_PAY_BTN_EXISTS = (
+    "[...document.querySelectorAll('button')]"
+    ".filter(e=>e.offsetWidth||e.offsetHeight)"
+    ".some(e=>/원 결제하기$/.test((e.innerText||'').trim().replace(/\\s+/g,' ')))"
+)
+
+JS_PAY_BTN = """
+  const norm = s => (s || '').trim().replace(/\\s+/g, ' ');
+  return [...document.querySelectorAll('button')]
+    .filter(e => (e.offsetWidth || e.offsetHeight))
+    .filter(e => /원 결제하기$/.test(norm(e.innerText)));
+"""
+
+
+def _to_payment_page(tab) -> bool:
+    """좌석 선택 상태에서 결제수단 화면(/mpy/main)까지 밀어두고 멈춥니다.
+
+    좌석은 고른 순간 서버가 선점하고 제한시간이 있으므로, 결제수단만
+    고르면 되는 상태로 세워두는 편이 그 시간을 알차게 씁니다.
+    결제수단을 고르고 확정하지 않으면 결제되지 않습니다.
     """
-    if not tab.click(js_by_text("선택완료", tags="button"), wait=5.0):
-        _log("'선택완료'를 누르지 못했습니다.")
-        return False
+    # 좌석 맵 모달이 열려 있으면 '선택완료'로 닫습니다.
+    if tab.ev(f"!!({JS_SEATMAP_MODAL})"):
+        if not tab.click(js_by_text("선택완료", tags="button"),
+                         until=f"!({JS_SEATMAP_MODAL})", timeout=8):
+            _log("'선택완료'를 누르지 못했습니다.")
+            return False
     _dismiss_timer(tab)
 
-    pay_btn = """
-      const norm = s => (s || '').trim().replace(/\\s+/g, ' ');
-      return [...document.querySelectorAll('button')]
-        .filter(e => (e.offsetWidth || e.offsetHeight))
-        .filter(e => /원 결제하기$/.test(norm(e.innerText)));
-    """
-    if not tab.click(pay_btn, wait=6.0):
+    # 결제하기 → '결제 전 확인해 주세요' 안내 모달이 뜹니다.
+    if not tab.click(JS_PAY_BTN,
+                     until="!!document.querySelector('.cgv-modal.active')",
+                     timeout=8):
         _log("결제하기 버튼을 누르지 못했습니다.")
         return False
 
-    # '결제 전 확인해 주세요' 안내 모달
-    tab.click("""
-      const norm = s => (s || '').trim().replace(/\\s+/g, ' ');
+    js_on_pay_page = f"location.href.includes({json.dumps(PAY_URL_PART)})"
+    if not tab.click(r"""
+      const norm = s => (s || '').trim().replace(/\s+/g, ' ');
       const m = [...document.querySelectorAll('.cgv-modal.active')].pop();
       if (!m) return null;
       return [...m.querySelectorAll('button')].filter(e => norm(e.innerText) === '결제하기');
-    """, wait=8.0, retries=2)
-
-    for _ in range(12):
-        if PAY_URL_PART in (tab.ev("location.href") or ""):
-            break
-        time.sleep(1.0)
-    else:
+    """, until=js_on_pay_page, timeout=12, retries=2):
         _log("결제 페이지로 넘어가지 못했습니다.")
         return False
 
-    # 금액은 막지 않고 기록만 합니다. 카카오페이 승인 화면에 금액이 표시되고
-    # 사용자가 그것을 보고 승인하므로, 여기서 고정값과 비교할 필요가 없습니다.
-    amount = _final_amount(tab)
-    _log(f"결제 페이지 · 최종결제금액 {amount:,}원" if amount
-         else "결제 페이지 · 금액을 읽지 못했습니다")
+    # 결제수단 목록이 실제로 렌더될 때까지 기다립니다.
+    tab.wait_for("!!document.querySelector('img[alt=\"카카오페이\"]')",
+                 timeout=8)
 
+    # 금액은 막지 않고 기록만 합니다. 승인 화면에 금액이 표시되고
+    # 사용자가 그것을 보고 승인하므로 고정값과 비교할 필요가 없습니다.
+    amount = _final_amount(tab)
+    _log(f"결제수단 화면 · 최종결제금액 {amount:,}원" if amount
+         else "결제수단 화면 · 금액을 읽지 못했습니다")
+    return True
+
+
+def _request_kakao_pay(tab, identity: dict, confirm_timeout: int) -> bool:
+    """결제수단 화면에서 카카오페이를 골라 결제요청까지 보냅니다."""
     # 결제수단을 먼저 고릅니다. 수단을 고르면 약관 체크가 초기화되므로
     # 순서를 바꾸면 '전체 약관에 동의해주세요'에서 막힙니다.
-    if not tab.click(_js_pay_method("카카오페이"), wait=3.5):
+    if not tab.click(_js_pay_method("카카오페이"),
+                     until=("(()=>{const i=document.querySelector("
+                            "'img[alt=\"카카오페이\"]');const li=i?i.closest('li'):null;"
+                            "return li?/active/.test((li.className||'').toString()):false;})()"),
+                     timeout=6):
         _log("카카오페이를 선택하지 못했습니다.")
         return False
-    if not _pay_method_active(tab, "카카오페이"):
-        _log("카카오페이가 선택 상태로 바뀌지 않았습니다.")
-        return False
 
-    if not tab.click(_js_checkbox_label("chkAll"), wait=2.0):
+    js_terms_ok = ("(()=>{const e=document.getElementById('chkAll');"
+                   "return e?e.checked:false;})()")
+    if not tab.click(_js_checkbox_label("chkAll"), until=js_terms_ok,
+                     timeout=6):
         _log("약관 전체 동의를 체크하지 못했습니다.")
-        return False
-    if not tab.ev("(() => { const e = document.getElementById('chkAll');"
-                  " return e ? e.checked : false; })()"):
-        _log("약관 동의가 반영되지 않았습니다.")
         return False
 
     _dismiss_timer(tab)
-    if not tab.click(pay_btn, wait=10.0):
-        _log("결제 요청을 보내지 못했습니다.")
+    js_on_kakao = f"location.href.includes({json.dumps(KAKAO_HOST)})"
+    if not tab.click(JS_PAY_BTN, until=js_on_kakao, timeout=15):
+        _log("카카오페이 화면으로 넘어가지 못했습니다. 브라우저를 확인하세요.")
         return False
 
-    for _ in range(15):
-        url = tab.ev("location.href") or ""
-        if KAKAO_HOST in url:
-            time.sleep(1.5)
-            return _kakao_handoff(tab, identity, confirm_timeout)
-        time.sleep(1.0)
-
-    _log("카카오페이 화면으로 넘어가지 못했습니다. 브라우저를 확인하세요.")
-    return False
+    time.sleep(1.0)
+    return _kakao_handoff(tab, identity, confirm_timeout)
 
 
 def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
@@ -613,48 +684,53 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         if not _theater_chosen(tab):
             if not tab.click(
                 _js_modal("지역별", "button, span, li, div, label", theater,
-                          exact=True), wait=2.5
+                          exact=True), until=JS_CONFIRM_BTN, timeout=6
             ):
                 _log(f"극장 '{theater}' 를 찾지 못했습니다.")
                 return False
             if not tab.click(_js_modal("지역별", "button", "극장선택",
-                                       exact=True), wait=4.0, retries=2):
-                _log("'극장선택' 버튼을 누르지 못했습니다.")
-                return False
-            if not _theater_chosen(tab):
+                                       exact=True),
+                             until=JS_THEATER_OK, timeout=8, retries=2):
                 _log(f"극장 '{theater}' 가 선택되지 않았습니다.")
                 return False
 
         # 영화 목록이 안 열려 있으면 '전체보기'로 엽니다.
         if not _movie_list_open(tab):
-            tab.click(js_by_text("전체보기", tags="button, a"), wait=2.5,
-                      retries=1)
+            tab.click(js_by_text("전체보기", tags="button, a"),
+                      until=JS_MOVIE_LIST, timeout=5, retries=1)
 
         if _movie_list_open(tab):
-            if not tab.click(_js_movie_in_list(movie), wait=3.5):
+            if not tab.click(_js_movie_in_list(movie),
+                             until=JS_DATES_READY, timeout=8):
                 _log(f"영화 '{movie}' 를 목록에서 찾지 못했습니다.")
                 return False
         else:
             _log("영화 목록을 열지 못했습니다.")
             return False
 
-        if not tab.click(_js_date_item(ymd), wait=3.0):
+        if not tab.click(_js_date_item(ymd), until=JS_SHOWTIMES, timeout=8):
             _log(f"날짜 {ymd} 를 선택하지 못했습니다.")
             return False
 
-        if not tab.click(_js_showtime(hhmm), wait=4.5):
+        # URL은 페이지가 조작 가능해지기 전에 바뀝니다. 인원 버튼이 실제로
+        # 렌더될 때까지 기다려야 다음 클릭이 먹습니다.
+        js_visitor_page = (
+            f"location.href.includes({json.dumps(VISITOR_URL_PART)}) && "
+            f"[...document.querySelectorAll('button[aria-label$=\"선택\"]')]"
+            f".length > 0"
+        )
+        if not tab.click(_js_showtime(hhmm), until=js_visitor_page, timeout=12):
             _log(f"{hhmm} 회차를 선택하지 못했습니다 (매진되었을 수 있습니다).")
             return False
 
-        for _ in range(10):
-            if VISITOR_URL_PART in (tab.ev("location.href") or ""):
-                break
-            time.sleep(1.0)
-        else:
-            _log("인원 선택 화면으로 넘어가지 못했습니다.")
-            return False
-
-        if not tab.click(_js_visitor_count(count), wait=2.5):
+        js_count_on = (
+            f"[...document.querySelectorAll('button[aria-label$=\"선택\"]')]"
+            f".some(e=>e.getAttribute('aria-label')==='{count} 선택'"
+            f" && e.getAttribute('aria-pressed')==='true')"
+        )
+        if not tab.ev(f"!!({js_count_on})") and not tab.click(
+            _js_visitor_count(count), until=js_count_on, timeout=9, retries=3
+        ):
             _log(f"인원 {count}명을 선택하지 못했습니다.")
             return False
 
@@ -662,8 +738,8 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         for _ in range(6):
             if _seat_map_open(tab):
                 break
-            tab.click(_js_open_seat_map(), wait=2.5, retries=1)
-            time.sleep(1.5)
+            tab.click(_js_open_seat_map(), until=JS_SEATMAP_OPEN, timeout=3,
+                      retries=1)
         else:
             _log("좌석 맵을 열지 못했습니다.")
             return False
@@ -671,13 +747,35 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         # 인원이 2명 이상이면 첫 좌석만 누르면 CGV가 옆자리까지 자동으로
         # 잡아줍니다. 그래서 하나 누른 뒤 모자란 만큼만 추가로 누릅니다.
         picked: list[str] = []
+        blocked: set[str] = set()   # 예매 제한으로 쓸 수 없는 좌석
         for loc in seat_loc_nos:
             if len(picked) >= count:
                 break
-            if not tab.click(_js_seat(loc), wait=1.8, retries=2):
+            # '아무 좌석이나 선택됨'이 아니라 '이 좌석이 선택됨'을 봐야 합니다.
+            # 제한 좌석은 선택 표시가 남아 있어서 전역 조건에 속습니다.
+            js_seat_on = (
+                f"[...document.querySelectorAll("
+                f"'button[data-seatlocno={json.dumps(loc)}]')]"
+                f".some(e=>/select|choice|on\\b|active/i.test("
+                f"(e.className||'').toString()))"
+            )
+            if not tab.click(_js_seat(loc), until=js_seat_on, timeout=4,
+                             retries=2):
                 _log(f"좌석 {loc} 을 누르지 못했습니다 (이미 팔렸을 수 있습니다).")
                 continue
-            picked = _selected_locnos(tab)
+            # 휠체어 전용석 등 예매 제한 좌석이면 안내가 뜹니다.
+            # 안내를 닫고 다음 후보 좌석으로 넘어갑니다.
+            if (msg := _restriction_modal(tab)):
+                _log(f"좌석 {loc} 예매 제한 — {msg}")
+                _dismiss_restriction(tab)
+                blocked.add(loc)
+                # 제한 좌석이 선택 상태로 남으면 인원 정원을 먹어서 다음
+                # 좌석을 누를 수 없습니다. 다시 눌러 해제합니다.
+                if tab.ev(f"!!({js_seat_on})"):
+                    tab.click(_js_seat(loc), until=f"!({js_seat_on})",
+                              timeout=3, retries=2)
+                continue
+            picked = [x for x in _selected_locnos(tab) if x not in blocked]
             if len(picked) >= count:
                 break
 
@@ -693,13 +791,17 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             _log("예매 내용이 요청과 달라 여기서 멈춥니다. 화면을 확인하세요.")
             return False
 
+        _log(f"좌석 {len(picked)}석 선점 ({', '.join(picked)})")
+
+        # 좌석은 이미 선점됐고 제한시간이 있으므로, 결제수단만 고르면 되는
+        # 화면까지 밀어둡니다. auto_pay가 없으면 여기서 멈춥니다.
+        if not _to_payment_page(tab):
+            return False
         if not pay:
-            _log(f"좌석 {len(picked)}석 선택 완료 ({', '.join(picked)}). "
-                 f"결제는 직접 진행하세요.")
+            _log("결제수단 화면까지 진행했습니다. 결제는 직접 하세요.")
             return True
 
-        return _to_payment_qr(tab, schedule, len(picked),
-                              kakao_identity(kakao), confirm_timeout)
+        return _request_kakao_pay(tab, kakao_identity(kakao), confirm_timeout)
 
     except Exception as e:
         _log(f"진행 중 오류 - {e}")

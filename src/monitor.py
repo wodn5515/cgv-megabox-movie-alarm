@@ -73,6 +73,9 @@ class ScheduleMonitor:
         self._last_seat_fetch: dict[str, float] = {}
         # 회차별 마지막 자동 예매 시도 시각
         self._last_book: dict[str, float] = {}
+        # 자동 예매가 성공한 타겟. 기본적으로 한 번 성공하면 더 잡지 않습니다.
+        # 조건에 맞는 자리가 여러 개면 반복 구매가 되기 때문입니다.
+        self._booked: set[str] = set()
         # 사이트별 마지막 요청 시간
         self._last_request: dict[str, float] = {}
         # 영화관별 상영일 목록 캐시 (조회시각, 목록)
@@ -589,6 +592,14 @@ class ScheduleMonitor:
 
         같은 회차를 반복해서 몰지 않도록 쿨다운을 둡니다.
         """
+        name = target["name"]
+        # 한 번 성공했으면 더 잡지 않습니다. 조건에 맞는 자리가 여럿이면
+        # 쿨다운이 지날 때마다 표를 계속 사게 됩니다.
+        # 반복 예매를 원하면 auto_book_once: false 로 둡니다.
+        once = target.get("auto_book_once", True)
+        if once and name in self._booked:
+            return
+
         last = self._last_book.get(key)
         if last is not None and time.time() - last < BOOK_COOLDOWN:
             return
@@ -601,8 +612,12 @@ class ScheduleMonitor:
         tickets = int(
             target.get("tickets") or seats_cfg.get("min_consecutive") or 1
         )
+        # 필요한 수보다 넉넉히 후보를 넘깁니다. 휠체어 전용석처럼 목록에는
+        # 판매 가능으로 보이지만 실제로 못 사는 좌석이 있어서, booker가
+        # 다음 후보로 넘어갈 수 있어야 합니다.
         seat_locs = [
-            s.get("seatLocNo") for s in group[:tickets] if s.get("seatLocNo")
+            s.get("seatLocNo") for s in group[:tickets + 5]
+            if s.get("seatLocNo")
         ]
         if not seat_locs:
             return
@@ -610,7 +625,7 @@ class ScheduleMonitor:
         def run():
             try:
                 from src import booker
-                booker.book(
+                ok = booker.book(
                     sch, seat_locs,
                     movie_filter=target.get("movie_filter", ""),
                     screen_filter=target.get("screen_filter", ""),
@@ -620,6 +635,11 @@ class ScheduleMonitor:
                     kakao=target.get("kakaopay"),
                     confirm_timeout=int(target.get("pay_timeout_sec") or 300),
                 )
+                if ok and once:
+                    self._booked.add(name)
+                    print(f"  자동 예매 성공 — '{name}' 의 자동 예매를 "
+                          f"더 시도하지 않습니다 (알림은 계속). "
+                          f"다시 잡으려면 재시작하세요.")
             except Exception as e:
                 print(f"  자동 예매 실패 - {e}")
 
