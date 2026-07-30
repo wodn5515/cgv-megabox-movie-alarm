@@ -300,7 +300,6 @@ class ScheduleMonitor:
         seen_any = False
 
         skipped = 0
-        first_sch: dict | None = None
         for ymd, holiday in self._target_dates(target, typ):
             # 조건에 맞는 회차가 없던 날짜는 한동안 건너뜁니다 (취소표 모드 한정).
             # 오픈 감시는 "없다가 생기는 것"을 잡아야 하므로 매번 확인합니다.
@@ -318,8 +317,6 @@ class ScheduleMonitor:
 
             if cancel_mode:
                 self._mark_empty_date(target["name"], ymd, not schedules)
-            if schedules and first_sch is None:
-                first_sch = schedules[0]
 
             if cancel_mode:
                 report.extend(
@@ -328,11 +325,6 @@ class ScheduleMonitor:
             elif schedules:
                 self._poll_open(target, schedules, typ, ymd)
                 return  # 오픈 감지되면 나머지 날짜는 볼 필요 없음
-
-        # 예매 화면 예열은 타겟당 한 바퀴에 한 번만. 날짜별로 하면
-        # 브라우저를 계속 헤집습니다.
-        if cancel_mode and target.get("auto_book") and first_sch:
-            self._warm(target, first_sch)
 
         now = datetime.now().strftime("%H:%M:%S")
         tail = f" (미상영 {skipped}일 건너뜀)" if skipped else ""
@@ -596,29 +588,6 @@ class ScheduleMonitor:
             "seats": seat_filter.describe(fresh),
             "url": _booking_url(sch, typ),
         })
-
-    def _warm(self, target: dict, sch: dict):
-        """예매 화면을 회차 목록까지 미리 열어둡니다.
-
-        이미 그 상태면 아무것도 하지 않습니다. 예매가 진행 중이면
-        브라우저를 건드리지 않습니다.
-        """
-        from src import booker
-        try:
-            if booker.is_staged(sch, target.get("movie_filter", "")):
-                return
-        except Exception:
-            return
-        if not self._book_lock.acquire(blocking=False):
-            return
-        try:
-            if booker.prepare(sch, movie_filter=target.get("movie_filter", ""),
-                              screen_filter=target.get("screen_filter", "")):
-                print(f"  예매 화면 예열 완료 ({target['name']})")
-        except Exception as e:
-            print(f"  예열 실패 - {e}")
-        finally:
-            self._book_lock.release()
 
     def _launch_booker(self, target: dict, sch: dict, key: str,
                        group: list[dict]):

@@ -160,7 +160,6 @@ def prepare(schedule: dict, movie_filter: str = "", screen_filter: str = "",
     except ChromeNotRunning:
         return False
     try:
-        tab.widen()
         return _stage(tab, schedule, movie_filter, screen_filter)
     except Exception:
         return False
@@ -175,13 +174,16 @@ def _stage(tab, schedule: dict, movie: str, screen_filter: str) -> bool:
     movie = movie or schedule.get("movNm", "")
 
     if _staged(tab, movie):
+        _mark("이미 준비됨")
         return True
 
     tab.goto(BOOK_URL)
     tab.wait_for(f"({JS_THEATER_MODAL})||({JS_MOVIE_LIST})", timeout=10)
+    _mark("① 페이지 로드")
 
     if screen_filter:
         tab.click(js_by_text(screen_filter, tags="button, li, span"), retries=1)
+        _mark("② 특별관 필터")
 
     if not _theater_chosen(tab):
         if not tab.click(
@@ -190,10 +192,12 @@ def _stage(tab, schedule: dict, movie: str, screen_filter: str) -> bool:
         ):
             _log(f"극장 '{theater}' 를 찾지 못했습니다.")
             return False
+        _mark("③ 극장 클릭")
         if not tab.click(_js_modal("지역별", "button", "극장선택", exact=True),
                          until=JS_THEATER_OK, timeout=8, retries=2):
             _log(f"극장 '{theater}' 가 선택되지 않았습니다.")
             return False
+        _mark("④ 극장선택 확정")
 
     if not _movie_list_open(tab):
         tab.click(js_by_text("전체보기", tags="button, a"),
@@ -207,6 +211,7 @@ def _stage(tab, schedule: dict, movie: str, screen_filter: str) -> bool:
         _log("영화 목록을 열지 못했습니다.")
         return False
 
+    _mark("⑤ 영화 클릭")
     # 날짜는 고르지 않습니다. 영화를 고르면 CGV가 첫 상영일을 자동 선택해
     # 회차 목록이 뜨고, 실제 예매 시 book()이 목표 날짜를 클릭합니다.
     return tab.wait_for(JS_SHOWTIMES, timeout=8)
@@ -256,6 +261,55 @@ def _js_date_item(ymd: str) -> str:
           if (m[1] !== undefined && Number(m[1]) !== month) return false;
           return Number(m[2]) === day;
         }});
+    """
+
+
+def js_date_active(ymd: str) -> str:
+    """날짜 스트립의 활성 항목이 목표 날짜인지 판정하는 JS 조건."""
+    month, day = int(ymd[4:6]), int(ymd[6:8])
+    return rf"""
+      (() => {{
+        const act = [...document.querySelectorAll('[class*="dayScroll_scrollItem"]')]
+          .filter(e => /itemActive/.test((e.className || '').toString()))
+          .map(e => (e.innerText || '').trim().replace(/\s+/g, ' '));
+        return act.some(t => {{
+          const m = t.match(/(?:(\d{{1,2}})\.)?(\d{{1,2}})$/);
+          if (!m) return false;
+          if (m[1] !== undefined && Number(m[1]) !== {month}) return false;
+          return Number(m[2]) === {day};
+        }});
+      }})()
+    """
+
+
+def js_showtime_ready(hhmm: str, screen: str, free: int, total: int) -> str:
+    """목표 회차가 '그 날짜의' 목록으로 갱신됐는지 판정하는 JS 조건.
+
+    활성 날짜만 보면 안 됩니다. 날짜 칩은 즉시 갱신되지만 회차 목록은
+    비동기로 받아오므로, 이전 날짜 목록에 같은 시간대가 있으면 그대로
+    통과해 엉뚱한 회차를 누릅니다.
+
+    회차 항목 텍스트에 '24:00-27:02 100/624석' 처럼 잔여석이 들어 있어서,
+    API 값과 대조하면 그 날짜의 목록인지 확실히 알 수 있습니다.
+    잔여석은 몇 초 사이 변하므로 여유를 둡니다.
+    """
+    tol = max(5, int(free * 0.3)) if free else 10 ** 9
+    return rf"""
+      (() => {{
+        const want = {json.dumps(hhmm)}, screen = {json.dumps(screen)};
+        const norm = s => (s || '').trim().replace(/\s+/g, ' ');
+        const blocks = [...document.querySelectorAll('div, section, li')]
+          .filter(e => (e.innerText || '').includes(screen))
+          .filter(e => e.querySelectorAll('[class*="screenInfo_timeItem"]').length);
+        const scope = blocks.length ? blocks[blocks.length - 1] : document;
+        return [...scope.querySelectorAll('[class*="screenInfo_timeItem"]')]
+          .filter(e => norm(e.innerText).startsWith(want))
+          .some(e => {{
+            const m = norm(e.innerText).match(/(\d+)\s*\/\s*{total}\s*석/);
+            if (!m) return false;
+            return Math.abs(Number(m[1]) - {free}) <= {tol};
+          }});
+      }})()
     """
 
 
@@ -359,9 +413,12 @@ def _seat_map_open(tab) -> bool:
 def _js_seat(seat_loc_no: str) -> str:
     """data-seatlocno로 좌석 버튼을 찾는 JS.
 
-    같은 좌석이 메인맵과 미니맵에 중복 렌더링됩니다. 미니맵 좌석은 3px
-    남짓이라 좌표가 조금만 어긋나도 옆 좌석이 눌립니다(실제로 y좌표가
-    4칸 밀린 좌석이 선택된 적이 있습니다). 큰 것(메인맵)부터 씁니다.
+    같은 좌석이 메인맵(38px)과 미니맵(3px)에 중복 렌더링됩니다.
+    큰 것부터 시도하되 미니맵도 후보로 남겨둡니다. 좌석맵이 가로로 넘치면
+    메인맵 좌석이 화면 밖(x<0)에 놓여 클릭할 수 없고, 그때는 미니맵이
+    유일한 경로입니다. 미니맵을 후보에서 빼면 아예 못 누릅니다.
+
+    엉뚱한 좌석이 눌리는 경우는 호출부의 per-seat 조건이 잡아냅니다.
     """
     return f"""
       return [...document.querySelectorAll(
@@ -371,10 +428,6 @@ def _js_seat(seat_loc_no: str) -> str:
         .sort((a, b) => {{
           const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
           return (rb.width * rb.height) - (ra.width * ra.height);
-        }})
-        .filter(e => {{
-          const r = e.getBoundingClientRect();
-          return r.width >= 8 && r.height >= 8;   // 미니맵(3px) 제외
         }});
     """
 
@@ -413,6 +466,90 @@ def _dismiss_alert(tab) -> bool:
       return [...m.querySelectorAll('button, a')]
         .filter(e => ['확인', '닫기'].includes(norm(e.innerText)));
     """, until=f"!(({JS_ALERT_MODAL}).length)", timeout=4, retries=2)
+
+
+def _seatmap_matches(tab, schedule: dict) -> tuple[bool, str]:
+    """화면의 좌석맵이 이 회차의 것인지 확인합니다.
+
+    날짜를 바꿔도 좌석맵이 이전 회차의 것으로 남는 경우가 있습니다.
+    그 상태로 진행하면 실제로는 빈 좌석인데 화면에서 '판매됨'으로 보여
+    아무것도 잡지 못합니다. 총 좌석 수와 잔여 수로 대조합니다.
+    """
+    total = _int(schedule.get("stcnt"))
+    free = _int(schedule.get("frSeatCnt"))
+    raw = tab.ev("""
+      (() => {
+        const b = [...document.querySelectorAll('button[data-seatlocno]')]
+          .filter(e => getComputedStyle(e).visibility !== 'hidden');
+        const uniq = new Set(b.map(e => e.getAttribute('data-seatlocno')));
+        const open = new Set(b.filter(e => !e.disabled)
+          .map(e => e.getAttribute('data-seatlocno')));
+        return JSON.stringify({total: uniq.size, free: open.size});
+      })()
+    """)
+    if not raw:
+        return False, "좌석맵을 읽지 못했습니다"
+    seen = json.loads(raw)
+    if total and seen["total"] != total:
+        return False, f"총 좌석 불일치 (API {total} / 화면 {seen['total']})"
+    # 잔여석은 몇 초 사이 변하므로 여유를 둡니다.
+    if free and abs(seen["free"] - free) > max(5, free * 0.3):
+        return False, f"잔여석 불일치 (API {free} / 화면 {seen['free']})"
+    return True, f"좌석맵 확인 (총 {seen['total']} · 잔여 {seen['free']})"
+
+
+def _int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bring_seat_into_view(tab, seat_loc_no: str) -> bool:
+    """좌석맵을 끌어서 목표 좌석(메인맵)을 화면 안으로 가져옵니다.
+
+    좌석맵은 react-zoom-pan-pinch 로 감싸여 있고 overflowX:hidden 이라
+    scrollIntoView 로 움직일 수 없습니다. 맵 폭이 컨테이너보다 넓어서
+    (2090px vs 600px) 바깥쪽 좌석은 잘려 보이지 않습니다.
+
+    그 상태에서는 3px 짜리 미니맵 좌석만 클릭 후보로 남고, 좌표가 조금만
+    어긋나도 옆자리가 선택됩니다(요청과 다른 좌석·다른 가격).
+    실제 드래그로 맵을 옮겨 메인맵 좌석을 정확히 누를 수 있게 합니다.
+    """
+    info = tab.ev(f"""
+      (() => {{
+        const els = [...document.querySelectorAll(
+          'button[data-seatlocno={json.dumps(seat_loc_no)}]')]
+          .filter(e => getComputedStyle(e).visibility !== 'hidden')
+          .sort((a, b) => {{
+            const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+            return (rb.width * rb.height) - (ra.width * ra.height);
+          }});
+        const el = els[0];
+        const box = document.querySelector('[class*="seatMap_container"]');
+        if (!el || !box) return null;
+        const r = el.getBoundingClientRect(), c = box.getBoundingClientRect();
+        const inside = r.left >= c.left && r.right <= c.right &&
+                       r.top >= c.top && r.bottom <= c.bottom;
+        return JSON.stringify({{
+          inside,
+          seat: [r.x + r.width / 2, r.y + r.height / 2],
+          box: [c.x + c.width / 2, c.y + c.height / 2, c.width, c.height]
+        }});
+      }})()
+    """)
+    if not info:
+        return False
+    d = json.loads(info)
+    if d["inside"]:
+        return True
+
+    sx, sy = d["seat"]
+    cx, cy, _, _ = d["box"]
+    # 좌석을 컨테이너 중앙으로 끌어옵니다.
+    tab.drag(cx, cy, cx + (cx - sx), cy + (cy - sy))
+    time.sleep(0.25)
+    return True
 
 
 def _seat_state(tab, seat_loc_no: str) -> str:
@@ -852,8 +989,6 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
 
     try:
         tab.front()
-        # 좌석맵이 가로로 넘치면 왼쪽 좌석이 화면 밖에 놓여 클릭할 수 없습니다.
-        tab.widen()
         _log(f"{theater} {ymd} {hhmm} {schedule.get('scnsNm', '')} {movie} · "
              f"{count}장 (후보 좌석 {len(seat_loc_nos)}개)")
 
@@ -862,17 +997,24 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         # 첫 페이지 로드가 전체 시간의 대부분이라 여기가 관건입니다.
         if not _stage(tab, schedule, movie, screen_filter):
             return False
-        _mark("준비")
+        _mark("⑥ 회차목록 대기")
 
         # 목표 회차가 목록에 나타날 때까지 기다립니다. 단순히 '회차가 있다'로
         # 기다리면 이전 날짜의 낡은 목록에서 그대로 클릭하게 됩니다.
+        # 영화를 고르면 CGV가 기본 날짜를 자동 선택합니다. 그 날짜 목록에도
+        # 같은 시간대 회차가 있을 수 있어, '회차가 보인다'만으로 기다리면
+        # 날짜 반영 전에 엉뚱한 날짜의 회차를 누릅니다.
+        # 활성 날짜가 목표 날짜인지까지 확인해야 합니다.
         screen = schedule.get("scnsNm", "")
-        if not tab.click(_js_date_item(ymd),
-                         until=js_showtime_present(hhmm, screen), timeout=10):
+        until_date = (
+            f"({js_date_active(ymd)}) && "
+            f"({js_showtime_ready(hhmm, screen, _int(schedule.get('frSeatCnt')), _int(schedule.get('stcnt')))})"
+        )
+        if not tab.click(_js_date_item(ymd), until=until_date, timeout=10):
             _log(f"{ymd} 의 {screen} {hhmm} 회차가 목록에 없습니다 "
                  f"(날짜 선택 실패 또는 매진).")
             return False
-        _mark("날짜 선택")
+        _mark("⑦ 날짜 클릭")
 
         # URL은 페이지가 조작 가능해지기 전에 바뀝니다. 인원 버튼이 실제로
         # 렌더될 때까지 기다려야 다음 클릭이 먹습니다.
@@ -887,7 +1029,7 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
                  f"(매진되었을 수 있습니다).")
             return False
 
-        _mark("회차 선택")
+        _mark("⑧ 회차 클릭 → 인원페이지")
         js_count_on = (
             f"[...document.querySelectorAll('button[aria-label$=\"선택\"]')]"
             f".some(e=>e.getAttribute('aria-label')==='{count} 선택'"
@@ -899,7 +1041,7 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             _log(f"인원 {count}명을 선택하지 못했습니다.")
             return False
 
-        _mark("인원 선택")
+        _mark("⑨ 인원 클릭")
         # 좌석 맵 열기. 반영이 늦을 때가 있어 열릴 때까지 확인합니다.
         for _ in range(6):
             if _seat_map_open(tab):
@@ -914,12 +1056,39 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
 
         # 인원이 2명 이상이면 첫 좌석만 누르면 CGV가 옆자리까지 자동으로
         # 잡아줍니다. 그래서 하나 누른 뒤 모자란 만큼만 추가로 누릅니다.
-        _mark("좌석 맵 열기")
+        _mark("⑩ 좌석맵 열기")
+        ok_map, map_msg = _seatmap_matches(tab, schedule)
+        if not ok_map:
+            _log(f"좌석맵이 이 회차의 것이 아닙니다 — {map_msg}. 중단합니다.")
+            return False
+
         picked: list[str] = []
         blocked: set[str] = set()   # 예매 제한으로 쓸 수 없는 좌석
+        clicks = 0                  # 실제로 누른 횟수 (건너뛴 좌석은 제외)
         for loc in seat_loc_nos:
+            # 인원 수보다 많이 누르지 않습니다. 첫 클릭이 요청과 다른 좌석을
+            # 잡았더라도 정원은 이미 찼고, 더 누르면 CGV가 "선택하신 관람인원은
+            # N명입니다" 팝업을 띄웁니다.
+            if clicks >= count:
+                break
+            # 매 반복마다 화면의 실제 선택 상태를 봅니다. 로컬 변수만 믿으면,
+            # 첫 클릭이 '요청한 좌석'을 못 잡았을 때(다른 좌석이 잡힌 경우)
+            # 실패로 처리되어 이미 정원이 찼는데도 계속 누릅니다.
+            picked = [x for x in _selected_locnos(tab) if x not in blocked]
             if len(picked) >= count:
                 break
+
+            # 누르기 전에 상태를 확인합니다. 팔린 좌석을 눌러봐야 팝업만
+            # 뜨고 재시도로 시간만 씁니다. 목록 조회와 클릭 사이 몇 초
+            # 동안 팔릴 수 있어 화면 기준으로 다시 봅니다.
+            state = _seat_state(tab, loc)
+            if state != "클릭 가능하나 반응 없음":
+                _log(f"좌석 {loc} 건너뜀 — {state}")
+                continue
+
+            clicks += 1
+            # 메인맵 좌석이 잘려 있으면 맵을 끌어와 정확히 누릅니다.
+            _bring_seat_into_view(tab, loc)
             # '아무 좌석이나 선택됨'이 아니라 '이 좌석이 선택됨'을 봐야 합니다.
             # 제한 좌석은 선택 표시가 남아 있어서 전역 조건에 속습니다.
             js_seat_on = (
@@ -973,7 +1142,7 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         if len(picked) != count:
             _log(f"좌석 {len(picked)}/{count}석만 선택됐습니다. 화면에서 확인하세요.")
 
-        _mark("좌석 클릭")
+        _mark("⑪ 좌석 클릭")
         ok, summary = verify_summary(tab, schedule, len(picked))
         _log(f"검증: {summary}")
         if not ok:

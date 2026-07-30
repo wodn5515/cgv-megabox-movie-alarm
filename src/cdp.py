@@ -83,20 +83,6 @@ class Tab:
                 continue  # 내비게이션 중 컨텍스트 교체
         return self.ev("location.href")
 
-    def widen(self, width: int = 2560, height: int = 1400):
-        """뷰포트를 넓힙니다.
-
-        좌석맵이 가로로 넘치면 왼쪽 좌석이 화면 밖(x<0)에 놓여 클릭할 수
-        없습니다. 미니맵 좌석은 3px라 눌러도 옆자리가 잡힙니다.
-        창 크기와 무관하게 전체 좌석맵이 들어오도록 뷰포트를 키웁니다.
-        """
-        try:
-            self.send("Emulation.setDeviceMetricsOverride", width=width,
-                      height=height, deviceScaleFactor=1, mobile=False)
-            return True
-        except RuntimeError:
-            return False
-
     def front(self):
         try:
             self.send("Page.bringToFront")
@@ -109,6 +95,19 @@ class Tab:
         for typ in ("mousePressed", "mouseReleased"):
             self.send("Input.dispatchMouseEvent", type=typ, x=x, y=y,
                       button="left", clickCount=1)
+
+    def drag(self, x1: float, y1: float, x2: float, y2: float,
+             steps: int = 8):
+        """실제 마우스 드래그. 팬/줌 컴포넌트를 움직일 때 씁니다."""
+        self.send("Input.dispatchMouseEvent", type="mouseMoved", x=x1, y=y1)
+        self.send("Input.dispatchMouseEvent", type="mousePressed", x=x1, y=y1,
+                  button="left", clickCount=1)
+        for i in range(1, steps + 1):
+            self.send("Input.dispatchMouseEvent", type="mouseMoved",
+                      x=x1 + (x2 - x1) * i / steps,
+                      y=y1 + (y2 - y1) * i / steps, button="left")
+        self.send("Input.dispatchMouseEvent", type="mouseReleased", x=x2, y=y2,
+                  button="left", clickCount=1)
 
     def locate(self, js_finder: str) -> dict | None:
         """요소를 찾아 히트테스트까지 통과한 클릭 좌표를 돌려줍니다.
