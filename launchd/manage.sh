@@ -11,6 +11,10 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 프로젝트 루트/파이썬 경로를 체크아웃 위치에서 자동으로 잡습니다.
+# 덕분에 plist를 머신마다 고칠 필요 없이 어디서 받아도 그대로 돕니다.
+PROJECT="$(cd "$HERE/.." && pwd)"
+PYTHON="$PROJECT/venv/bin/python"
 AGENTS="$HOME/Library/LaunchAgents"
 LOGDIR="$HOME/Library/Logs/cgv-monitor"
 LABELS=(local.cgv-monitor local.cgv-watchdog)
@@ -41,10 +45,19 @@ boot_in() {
 
 case "${1:-}" in
 install)
+    if [ ! -x "$PYTHON" ]; then
+        echo "venv 파이썬이 없습니다: $PYTHON" >&2
+        echo "먼저 'python3 -m venv venv && ./venv/bin/pip install -r requirements.txt'" >&2
+        exit 1
+    fi
     mkdir -p "$AGENTS" "$LOGDIR"
     for l in "${LABELS[@]}"; do
         boot_out "$l"
-        cp "$HERE/$l.plist" "$AGENTS/$l.plist"
+        # plist의 placeholder를 이 체크아웃의 실제 경로로 치환해 설치합니다.
+        sed -e "s#__PYTHON__#$PYTHON#g" \
+            -e "s#__WORKDIR__#$PROJECT#g" \
+            -e "s#__LOGDIR__#$LOGDIR#g" \
+            "$HERE/$l.plist" > "$AGENTS/$l.plist"
         boot_in "$l"
         echo "설치됨: $l"
     done
