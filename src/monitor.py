@@ -61,8 +61,6 @@ class ScheduleMonitor:
         self.max_rpm = config.get("max_requests_per_minute", 2)
         # Discord / 텔레그램 설정 (notifier가 채널별로 알아서 발송)
         self.notif = config.get("notifications", {}) or {}
-        # 카톡결제 요청에 쓸 휴대폰번호·생년월일 (개인정보, config.yaml은 gitignore)
-        self.kakaopay = config.get("kakaopay") or {}
         self._opened: dict[str, bool] = {}
         # 취소표 모드에서 회차별로 마지막에 본 빈자리 (좌석 라벨 집합 / 잔여 수)
         self._free_seats: dict[str, set[str]] = {}
@@ -600,9 +598,8 @@ class ScheduleMonitor:
                     screen_filter=target.get("screen_filter", ""),
                     count=tickets,
                     pay=bool(target.get("auto_pay")),
-                    expect_amount=target.get("expect_amount"),
-                    # 타겟별 설정이 있으면 그것을, 없으면 전역 설정을 씁니다.
-                    kakao=target.get("kakaopay") or self.kakaopay,
+                    # 타겟에 지정된 것만 씁니다. 없으면 QR로 진행합니다.
+                    kakao=target.get("kakaopay"),
                 )
             except Exception as e:
                 print(f"  자동 예매 실패 - {e}")

@@ -293,33 +293,46 @@ PAY_URL_PART = "mpy/main"
 KAKAO_HOST = "kakaopay.com"
 
 
-def kakao_identity(cfg: dict | None = None) -> dict:
+def kakao_identity(spec) -> dict:
     """카톡결제 요청에 넣을 휴대폰번호·생년월일을 읽습니다.
 
-    타겟별 kakaopay → 전역 kakaopay → 환경변수 순으로 찾습니다.
-
-        kakaopay:                  # 전역 기본값
-          phone: "01012345678"
-          birth: "900101"          # YYMMDD 6자리
+    **타겟에 지정된 것만 씁니다. 전역 폴백은 없습니다.**
+    지정하지 않은 타겟은 QR결제 화면을 띄웁니다. 전역 기본값을 두면
+    의도하지 않은 사람에게 결제 요청이 갈 수 있어 명시를 요구합니다.
 
         targets:
-          - name: "..."
-            kakaopay:              # 이 타겟만 다른 사람에게 (선택)
-              phone: "..."
-              birth: "..."
+          - name: "내가 결제할 타겟"
+            kakaopay:
+              phone: "01012345678"
+              birth: "900101"      # YYMMDD 6자리
 
-        CGV_KAKAO_PHONE / CGV_KAKAO_BIRTH
+          - name: "환경변수로 받을 타겟"
+            kakaopay: true         # CGV_KAKAO_PHONE / CGV_KAKAO_BIRTH 사용
+
+          - name: "QR로 볼 타겟"
+            # kakaopay 없음 → QR결제 탭
 
     생년월일은 그 번호의 카카오페이 계정 본인 확인용입니다. 다른 사람에게
     보내려면 그 사람의 생년월일이어야 하고, 결제도 그 사람이 하게 됩니다.
 
     개인정보이므로 config.yaml은 .gitignore에 있어야 합니다.
     """
-    cfg = cfg or {}
-    phone = str(cfg.get("phone") or os.environ.get("CGV_KAKAO_PHONE", ""))
-    birth = str(cfg.get("birth") or os.environ.get("CGV_KAKAO_BIRTH", ""))
+    none = {"phone": "", "birth": ""}
+    if spec is True:
+        phone = os.environ.get("CGV_KAKAO_PHONE", "")
+        birth = os.environ.get("CGV_KAKAO_BIRTH", "")
+    elif isinstance(spec, dict):
+        phone = str(spec.get("phone") or "")
+        birth = str(spec.get("birth") or "")
+    else:
+        return none
+
     phone = re.sub(r"\D", "", phone)
     birth = re.sub(r"\D", "", birth)
+    # 둘 중 하나라도 비어 있으면 카톡결제를 시도하지 않고 QR로 갑니다.
+    # 반쯤 채워진 설정으로 엉뚱한 요청을 보내지 않기 위함입니다.
+    if not (phone and birth):
+        return none
     return {"phone": phone, "birth": birth}
 
 
@@ -372,8 +385,7 @@ def _kakao_handoff(tab, identity: dict) -> bool:
     return True
 
 
-def _to_payment_qr(tab, schedule: dict, seats: int,
-                   expect_amount: int | None, identity: dict) -> bool:
+def _to_payment_qr(tab, schedule: dict, seats: int, identity: dict) -> bool:
     """결제 페이지로 넘어가 카카오페이 QR까지 띄우고 멈춥니다.
 
     QR은 사용자가 폰으로 스캔해 승인해야 결제가 완료됩니다.
@@ -410,13 +422,11 @@ def _to_payment_qr(tab, schedule: dict, seats: int,
         _log("결제 페이지로 넘어가지 못했습니다.")
         return False
 
+    # 금액은 막지 않고 기록만 합니다. 카카오페이 승인 화면에 금액이 표시되고
+    # 사용자가 그것을 보고 승인하므로, 여기서 고정값과 비교할 필요가 없습니다.
     amount = _final_amount(tab)
-    if expect_amount is not None and amount != expect_amount:
-        _log(f"최종결제금액이 예상과 다릅니다 (예상 {expect_amount:,}원, "
-             f"화면 {amount:,}원 이라면 확인 필요). 결제를 진행하지 않습니다.")
-        return False
     _log(f"결제 페이지 · 최종결제금액 {amount:,}원" if amount
-         else "결제 페이지 · 금액 확인 실패")
+         else "결제 페이지 · 금액을 읽지 못했습니다")
 
     # 결제수단을 먼저 고릅니다. 수단을 고르면 약관 체크가 초기화되므로
     # 순서를 바꾸면 '전체 약관에 동의해주세요'에서 막힙니다.
@@ -453,9 +463,7 @@ def _to_payment_qr(tab, schedule: dict, seats: int,
 
 def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
          screen_filter: str = "", count: int | None = None,
-         port: int = 9222, pay: bool = False,
-         expect_amount: int | None = None,
-         kakao: dict | None = None) -> bool:
+         port: int = 9222, pay: bool = False, kakao=None) -> bool:
     """예매 화면을 열어 좌석 선택까지 진행합니다. 결제는 하지 않습니다.
 
     schedule: 모니터가 받은 회차 dict (siteNm, scnYmd, scnsrtTm, movNm 등)
@@ -569,7 +577,7 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
                  f"결제는 직접 진행하세요.")
             return True
 
-        return _to_payment_qr(tab, schedule, len(picked), expect_amount,
+        return _to_payment_qr(tab, schedule, len(picked),
                               kakao_identity(kakao))
 
     except Exception as e:
