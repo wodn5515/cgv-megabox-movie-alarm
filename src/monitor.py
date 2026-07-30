@@ -598,6 +598,7 @@ class ScheduleMonitor:
                     screen_filter=target.get("screen_filter", ""),
                     count=tickets,
                     pay=bool(target.get("auto_pay")),
+                    expect_amount=target.get("expect_amount"),
                 )
             except Exception as e:
                 print(f"  자동 예매 실패 - {e}")

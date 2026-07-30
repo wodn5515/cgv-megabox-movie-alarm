@@ -186,6 +186,81 @@ def _selected_locnos(tab) -> list[str]:
     return json.loads(raw) if raw else []
 
 
+def _js_checkbox_label(checkbox_id: str) -> str:
+    """체크박스를 실제로 토글하는 라벨을 찾는 JS.
+
+    input 자체는 SVG 아이콘 라벨에 가려져 있어 input 좌표를 눌러도
+    토글되지 않습니다. 그 좌표에서 히트되는 요소의 label을 눌러야 합니다.
+    """
+    return f"""
+      const i = document.getElementById({json.dumps(checkbox_id)});
+      if (!i) return null;
+      i.scrollIntoView({{block: 'center'}});
+      const b = i.getBoundingClientRect();
+      const hit = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+      const lab = hit ? hit.closest('label') : null;
+      return lab ? [lab] : (hit ? [hit] : null);
+    """
+
+
+def _js_pay_method(alt: str) -> str:
+    """결제수단 아이콘(img[alt])으로 해당 항목을 찾는 JS."""
+    return f"""
+      return [...document.querySelectorAll('img[alt={json.dumps(alt)}]')]
+        .map(i => i.closest('button, label, li') || i);
+    """
+
+
+def _pay_method_active(tab, alt: str) -> bool:
+    return bool(tab.ev(f"""
+      (() => {{
+        const i = document.querySelector('img[alt={json.dumps(alt)}]');
+        const li = i ? i.closest('li') : null;
+        return li ? /active/.test((li.className || '').toString()) : false;
+      }})()
+    """))
+
+
+def _final_amount(tab) -> int | None:
+    """화면의 최종결제금액을 숫자로 읽습니다."""
+    raw = tab.ev(
+        r"""(() => {
+          const m = document.body.innerText.match(/최종결제금액\s*([\d,]+)\s*원/);
+          return m ? m[1] : null;
+        })()"""
+    )
+    if not raw:
+        return None
+    try:
+        return int(raw.replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _dismiss_timer(tab, extend: bool = True):
+    """'결제 가능 시간이 N분 남았습니다' 알림을 처리합니다.
+
+    결제 직전 단계에서는 연장(확인)하는 편이 낫습니다. QR만 띄워두고
+    시간이 만료되면 사용자가 승인할 틈이 없습니다.
+    """
+    text = tab.ev("""
+      (() => {
+        const m = document.querySelector('.cgv-modal.modal-alert.active');
+        return m ? (m.innerText || '').replace(/\\s+/g, ' ') : '';
+      })()
+    """) or ""
+    if "연장" not in text:
+        return
+    want = "확인" if extend else "취소"
+    tab.click(f"""
+      const m = document.querySelector('.cgv-modal.modal-alert.active');
+      if (!m) return null;
+      return [...m.querySelectorAll('button, a')]
+        .filter(e => (e.innerText || '').trim() === {json.dumps(want)});
+    """, wait=1.5)
+    _log(f"결제 가능 시간 알림 → {want}")
+
+
 def verify_summary(tab, schedule: dict, expect_seats: int) -> tuple[bool, str]:
     """결제로 넘어가기 전에 화면의 예매 내용이 요청과 맞는지 확인합니다.
 
@@ -212,9 +287,94 @@ def verify_summary(tab, schedule: dict, expect_seats: int) -> tuple[bool, str]:
     return True, f"{checks['영화']} {checks['날짜']} {hhmm} · 좌석 {len(picked)}석"
 
 
+PAY_URL_PART = "mpy/main"
+KAKAO_HOST = "kakaopay.com"
+
+
+def _to_payment_qr(tab, schedule: dict, seats: int,
+                   expect_amount: int | None) -> bool:
+    """결제 페이지로 넘어가 카카오페이 QR까지 띄우고 멈춥니다.
+
+    QR은 사용자가 폰으로 스캔해 승인해야 결제가 완료됩니다.
+    QR이 뜬 뒤에는 아무것도 누르지 않습니다.
+    """
+    if not tab.click(js_by_text("선택완료", tags="button"), wait=5.0):
+        _log("'선택완료'를 누르지 못했습니다.")
+        return False
+    _dismiss_timer(tab)
+
+    pay_btn = """
+      const norm = s => (s || '').trim().replace(/\\s+/g, ' ');
+      return [...document.querySelectorAll('button')]
+        .filter(e => (e.offsetWidth || e.offsetHeight))
+        .filter(e => /원 결제하기$/.test(norm(e.innerText)));
+    """
+    if not tab.click(pay_btn, wait=6.0):
+        _log("결제하기 버튼을 누르지 못했습니다.")
+        return False
+
+    # '결제 전 확인해 주세요' 안내 모달
+    tab.click("""
+      const norm = s => (s || '').trim().replace(/\\s+/g, ' ');
+      const m = [...document.querySelectorAll('.cgv-modal.active')].pop();
+      if (!m) return null;
+      return [...m.querySelectorAll('button')].filter(e => norm(e.innerText) === '결제하기');
+    """, wait=8.0, retries=2)
+
+    for _ in range(12):
+        if PAY_URL_PART in (tab.ev("location.href") or ""):
+            break
+        time.sleep(1.0)
+    else:
+        _log("결제 페이지로 넘어가지 못했습니다.")
+        return False
+
+    amount = _final_amount(tab)
+    if expect_amount is not None and amount != expect_amount:
+        _log(f"최종결제금액이 예상과 다릅니다 (예상 {expect_amount:,}원, "
+             f"화면 {amount:,}원 이라면 확인 필요). 결제를 진행하지 않습니다.")
+        return False
+    _log(f"결제 페이지 · 최종결제금액 {amount:,}원" if amount
+         else "결제 페이지 · 금액 확인 실패")
+
+    # 결제수단을 먼저 고릅니다. 수단을 고르면 약관 체크가 초기화되므로
+    # 순서를 바꾸면 '전체 약관에 동의해주세요'에서 막힙니다.
+    if not tab.click(_js_pay_method("카카오페이"), wait=3.5):
+        _log("카카오페이를 선택하지 못했습니다.")
+        return False
+    if not _pay_method_active(tab, "카카오페이"):
+        _log("카카오페이가 선택 상태로 바뀌지 않았습니다.")
+        return False
+
+    if not tab.click(_js_checkbox_label("chkAll"), wait=2.0):
+        _log("약관 전체 동의를 체크하지 못했습니다.")
+        return False
+    if not tab.ev("(() => { const e = document.getElementById('chkAll');"
+                  " return e ? e.checked : false; })()"):
+        _log("약관 동의가 반영되지 않았습니다.")
+        return False
+
+    _dismiss_timer(tab)
+    if not tab.click(pay_btn, wait=10.0):
+        _log("결제 요청을 보내지 못했습니다.")
+        return False
+
+    for _ in range(15):
+        url = tab.ev("location.href") or ""
+        if KAKAO_HOST in url:
+            _log("카카오페이 QR이 표시되었습니다. 폰으로 스캔해 승인하세요.")
+            _log("(여기서 멈춥니다. 결제 승인은 진행하지 않습니다.)")
+            return True
+        time.sleep(1.0)
+
+    _log("카카오페이 화면으로 넘어가지 못했습니다. 브라우저를 확인하세요.")
+    return False
+
+
 def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
          screen_filter: str = "", count: int | None = None,
-         port: int = 9222, pay: bool = False) -> bool:
+         port: int = 9222, pay: bool = False,
+         expect_amount: int | None = None) -> bool:
     """예매 화면을 열어 좌석 선택까지 진행합니다. 결제는 하지 않습니다.
 
     schedule: 모니터가 받은 회차 dict (siteNm, scnYmd, scnsrtTm, movNm 등)
@@ -323,12 +483,12 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             _log("예매 내용이 요청과 달라 여기서 멈춥니다. 화면을 확인하세요.")
             return False
 
-        if pay:
-            _log("결제 단계는 아직 구현되지 않았습니다. 좌석까지만 잡았습니다.")
+        if not pay:
+            _log(f"좌석 {len(picked)}석 선택 완료 ({', '.join(picked)}). "
+                 f"결제는 직접 진행하세요.")
+            return True
 
-        _log(f"좌석 {len(picked)}석 선택 완료 ({', '.join(picked)}). "
-             f"결제는 직접 진행하세요.")
-        return True
+        return _to_payment_qr(tab, schedule, len(picked), expect_amount)
 
     except Exception as e:
         _log(f"진행 중 오류 - {e}")
