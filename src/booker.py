@@ -603,21 +603,27 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         tab.goto(BOOK_URL)
         time.sleep(1.5)
 
-        # 극장은 예매용 크롬에서 미리 골라둔 것을 씁니다.
+        # 극장을 먼저 고릅니다. 극장 모달이 영화 모달을 덮고 있어서
+        # 순서를 바꾸면 영화를 누를 수 없습니다.
         #
-        # 극장 선택 모달을 자동으로 다루려 했지만 교착이 있습니다.
-        # 극장이 선택되지 않은 상태로 이 페이지에 들어가면 영화 모달과
-        # 극장 모달이 같은 z-index로 동시에 뜨고, 위에 오는 극장 모달은
-        # 영화가 선택되기 전에는 극장을 눌러도 선택 칩과 '극장선택' 버튼이
-        # 생기지 않습니다. 반대로 영화는 극장 모달에 덮여 누를 수 없습니다.
-        #
-        # 그래서 준비 단계로 분리했습니다. 예매용 크롬에서 한 번 극장을
-        # 고르면 프로필에 남아 이후로는 이 분기를 타지 않습니다.
+        # 자주가는 극장에 등록해두어도 이 경로로 들어오면 매번 미선택
+        # 상태이므로, 들어올 때마다 골라야 합니다.
+        # ('지역별'은 극장 모달에만 있는 문구입니다. '검색'은 영화 모달에도
+        #  있어서 모달을 특정하는 마커로 쓸 수 없습니다.)
         if not _theater_chosen(tab):
-            _log(f"예매용 크롬에 극장이 선택돼 있지 않습니다.")
-            _log(f"그 창에서 '{theater}'을 한 번 골라두세요 "
-                 f"(자주가는 CGV 목록 수정 → 극장 선택). 이후로는 유지됩니다.")
-            return False
+            if not tab.click(
+                _js_modal("지역별", "button, span, li, div, label", theater,
+                          exact=True), wait=2.5
+            ):
+                _log(f"극장 '{theater}' 를 찾지 못했습니다.")
+                return False
+            if not tab.click(_js_modal("지역별", "button", "극장선택",
+                                       exact=True), wait=4.0, retries=2):
+                _log("'극장선택' 버튼을 누르지 못했습니다.")
+                return False
+            if not _theater_chosen(tab):
+                _log(f"극장 '{theater}' 가 선택되지 않았습니다.")
+                return False
 
         # 영화 목록이 안 열려 있으면 '전체보기'로 엽니다.
         if not _movie_list_open(tab):

@@ -27,6 +27,30 @@ def describe(groups: list[list[dict]]) -> list[str]:
     return out
 
 
+def seat_range(seat_no) -> tuple[int | None, int | None]:
+    """seat_no 설정을 (하한, 상한)으로 해석합니다.
+
+    [16, 29] → 16번~29번
+    [16]     → 16번 이상 (상한 없음)
+    []/None  → 제한 없음
+
+    값이 하나만 있는 설정을 쓰다가 터지지 않게 관대하게 받습니다.
+    """
+    if not seat_no:
+        return None, None
+    if isinstance(seat_no, (int, str)):
+        seat_no = [seat_no]
+    try:
+        nums = [int(v) for v in seat_no]
+    except (TypeError, ValueError):
+        return None, None
+    if not nums:
+        return None, None
+    if len(nums) == 1:
+        return nums[0], None
+    return min(nums[0], nums[1]), max(nums[0], nums[1])
+
+
 def _seat_num(seat: dict) -> int | None:
     try:
         return int(seat.get("seatNo"))
@@ -53,11 +77,13 @@ def match(seats: list[dict], cfg: dict | None) -> list[list[dict]]:
             s for s in candidates
             if (s.get("seatRowNm") or "").upper() in rows
         ]
-    if seat_no:
-        lo, hi = int(seat_no[0]), int(seat_no[1])
+    lo, hi = seat_range(seat_no)
+    if lo is not None or hi is not None:
         candidates = [
             s for s in candidates
-            if (n := _seat_num(s)) is not None and lo <= n <= hi
+            if (n := _seat_num(s)) is not None
+            and (lo is None or n >= lo)
+            and (hi is None or n <= hi)
         ]
 
     if min_run <= 1:
