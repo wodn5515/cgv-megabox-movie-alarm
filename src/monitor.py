@@ -17,9 +17,6 @@ DATE_CACHE_TTL = 600
 # 조건에 맞는 회차가 없던 날짜를 건너뛰는 기간.
 # 아직 회차가 안 붙은 날짜에 회차가 생기는 순간이 좌석을 잡을 최적기라 짧게 잡습니다.
 EMPTY_DATE_TTL = 900
-# 같은 회차에 대해 자동 예매를 다시 시도하기까지의 최소 간격.
-# 반복 알림이 돌 때마다 브라우저를 다시 몰면 안 되므로 넉넉히 둡니다.
-BOOK_COOLDOWN = 600
 # 잔여석 수가 그대로여도 이 주기마다는 좌석 배치도를 강제로 다시 받습니다.
 # 취소와 매수가 같은 바퀴에 상쇄되면 수가 안 변해 좌석 변화를 놓치는데,
 # 이 갱신이 최악의 누락 시간을 이 값으로 묶어줍니다.
@@ -71,15 +68,16 @@ class ScheduleMonitor:
         self._free_desc: dict[str, list[str]] = {}
         # 회차별 마지막 좌석 배치도 조회 시각 (강제 갱신 주기 계산용)
         self._last_seat_fetch: dict[str, float] = {}
-        # 회차별 마지막 자동 예매 시도 시각
-        self._last_book: dict[str, float] = {}
-        # 자동 예매가 성공한 타겟. 기본적으로 한 번 성공하면 더 잡지 않습니다.
-        # 조건에 맞는 자리가 여러 개면 반복 구매가 되기 때문입니다.
+        # 결제까지 완료된 타겟. 표를 이미 샀으므로 감시와 자동 예매를
+        # 모두 멈춥니다. 선점만 하고 결제하지 않은 경우는 포함하지 않습니다.
         self._booked: set[str] = set()
         # 예매는 크롬 탭 하나를 몰기 때문에 동시에 두 건이 돌면 서로를
         # 망칩니다. 날짜가 여러 개면 8/10 예매 중에 8/11이 걸릴 수 있어
         # 한 번에 한 건만 진행하도록 잠금을 둡니다.
         self._book_lock = threading.Lock()
+        # 예열된 (타겟명, 날짜). 취소표가 뜬 뒤 첫 페이지 로드에 4초 가까이
+        # 쓰이므로, 감시 중 미리 회차 목록까지 띄워둡니다.
+        self._warmed: tuple[str, str] | None = None
         # 사이트별 마지막 요청 시간
         self._last_request: dict[str, float] = {}
         # 영화관별 상영일 목록 캐시 (조회시각, 목록)
@@ -134,6 +132,9 @@ class ScheduleMonitor:
         while True:
             for target in self.targets:
                 if self._opened.get(target["name"]):
+                    continue
+                # 결제까지 끝난 타겟은 알림도 보내지 않습니다.
+                if target["name"] in self._booked:
                     continue
 
                 try:
@@ -323,6 +324,9 @@ class ScheduleMonitor:
                 report.extend(
                     self._poll_cancel(target, schedules, typ, ymd)
                 )
+                # 자동 예매 타겟이면 예매 화면을 미리 띄워둡니다.
+                if target.get("auto_book") and schedules:
+                    self._warm(target, schedules[0], ymd)
             elif schedules:
                 self._poll_open(target, schedules, typ, ymd)
                 return  # 오픈 감지되면 나머지 날짜는 볼 필요 없음
@@ -590,6 +594,27 @@ class ScheduleMonitor:
             "url": _booking_url(sch, typ),
         })
 
+    def _warm(self, target: dict, sch: dict, ymd: str):
+        """예매 화면을 회차 목록까지 미리 열어둡니다.
+
+        브라우저를 쓰는 작업이므로 예매가 진행 중이면 건너뜁니다.
+        같은 (타겟, 날짜)로 이미 예열했으면 다시 하지 않습니다.
+        """
+        mark = (target["name"], ymd)
+        if self._warmed == mark:
+            return
+        if not self._book_lock.acquire(blocking=False):
+            return
+        try:
+            from src import booker
+            if booker.prepare(sch, movie_filter=target.get("movie_filter", ""),
+                              screen_filter=target.get("screen_filter", "")):
+                self._warmed = mark
+        except Exception as e:
+            print(f"  예열 실패 - {e}")
+        finally:
+            self._book_lock.release()
+
     def _launch_booker(self, target: dict, sch: dict, key: str,
                        group: list[dict]):
         """크롬에서 좌석 선택까지 진행합니다. 폴링을 막지 않도록 별도 스레드로.
@@ -597,23 +622,20 @@ class ScheduleMonitor:
         같은 회차를 반복해서 몰지 않도록 쿨다운을 둡니다.
         """
         name = target["name"]
-        # 한 번 성공했으면 더 잡지 않습니다. 조건에 맞는 자리가 여럿이면
-        # 쿨다운이 지날 때마다 표를 계속 사게 됩니다.
+        # 결제까지 끝났으면 더 잡지 않습니다. 표는 이미 있는데 조건에 맞는
+        # 자리가 남아 있으면 계속 사게 되고, 남의 자리를 5분씩 묶습니다.
         # 반복 예매를 원하면 auto_book_once: false 로 둡니다.
         once = target.get("auto_book_once", True)
         if once and name in self._booked:
             return
 
-        last = self._last_book.get(key)
-        if last is not None and time.time() - last < BOOK_COOLDOWN:
-            return
-
+        # 쿨다운은 두지 않습니다. 동시 실행은 아래 잠금이 막고, 좌석은
+        # 약 5분이면 만료되므로 실패했으면 바로 다시 시도하는 편이 낫습니다.
         # 이미 다른 예매가 브라우저를 쓰고 있으면 건너뜁니다.
         # 놓쳐도 다음 바퀴에 다시 잡힙니다.
         if not self._book_lock.acquire(blocking=False):
             print(f"  자동 예매 대기 — 다른 예매가 진행 중입니다 ({name})")
             return
-        self._last_book[key] = time.time()
 
         # 예매할 인원 수. 명시가 없으면 연석 조건(min_consecutive)을 씁니다.
         # 좌석 묶음이 요청보다 길 수 있으므로(연속 5석 등) 앞에서부터 필요한
@@ -643,13 +665,15 @@ class ScheduleMonitor:
                     pay=bool(target.get("auto_pay")),
                     # 타겟에 지정된 것만 씁니다. 없으면 QR로 진행합니다.
                     kakao=target.get("kakaopay"),
-                    confirm_timeout=int(target.get("pay_timeout_sec") or 300),
+                    **({"confirm_timeout": int(target["pay_timeout_sec"])}
+                       if target.get("pay_timeout_sec") else {}),
                 )
-                if ok and once:
+                # 'paid' = 결제 완료, 'held' = 선점만. 선점만으로는
+                # 멈추지 않습니다. 사용자가 결제하지 않았을 수 있습니다.
+                if ok == "paid" and once:
                     self._booked.add(name)
-                    print(f"  자동 예매 성공 — '{name}' 의 자동 예매를 "
-                          f"더 시도하지 않습니다 (알림은 계속). "
-                          f"다시 잡으려면 재시작하세요.")
+                    print(f"  결제 완료 — '{name}' 감시를 중단합니다. "
+                          f"다시 감시하려면 재시작하세요.")
             except Exception as e:
                 print(f"  자동 예매 실패 - {e}")
             finally:
