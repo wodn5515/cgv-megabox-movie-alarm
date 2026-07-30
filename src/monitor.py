@@ -1,3 +1,4 @@
+import threading
 import time
 from datetime import datetime
 
@@ -16,6 +17,9 @@ DATE_CACHE_TTL = 600
 # 조건에 맞는 회차가 없던 날짜를 건너뛰는 기간.
 # 아직 회차가 안 붙은 날짜에 회차가 생기는 순간이 좌석을 잡을 최적기라 짧게 잡습니다.
 EMPTY_DATE_TTL = 900
+# 같은 회차에 대해 자동 예매를 다시 시도하기까지의 최소 간격.
+# 반복 알림이 돌 때마다 브라우저를 다시 몰면 안 되므로 넉넉히 둡니다.
+BOOK_COOLDOWN = 600
 # 잔여석 수가 그대로여도 이 주기마다는 좌석 배치도를 강제로 다시 받습니다.
 # 취소와 매수가 같은 바퀴에 상쇄되면 수가 안 변해 좌석 변화를 놓치는데,
 # 이 갱신이 최악의 누락 시간을 이 값으로 묶어줍니다.
@@ -67,6 +71,8 @@ class ScheduleMonitor:
         self._free_desc: dict[str, list[str]] = {}
         # 회차별 마지막 좌석 배치도 조회 시각 (강제 갱신 주기 계산용)
         self._last_seat_fetch: dict[str, float] = {}
+        # 회차별 마지막 자동 예매 시도 시각
+        self._last_book: dict[str, float] = {}
         # 사이트별 마지막 요청 시간
         self._last_request: dict[str, float] = {}
         # 영화관별 상영일 목록 캐시 (조회시각, 목록)
@@ -544,6 +550,9 @@ class ScheduleMonitor:
         fresh = [g for g in groups if any(seat_filter.label(s) in new for s in g)]
         self._last_alert[key] = time.time()
         self._hits += 1
+        # 자동 예매는 '새로 풀린 자리'에만 걸고, 반복 알림에는 걸지 않습니다.
+        if target.get("auto_book") and fresh:
+            self._launch_booker(target, sch, key, fresh[0])
         notify_cancel(self.notif, target["name"], {
             "date": _pretty_date(ymd),
             "time": start,
@@ -555,6 +564,48 @@ class ScheduleMonitor:
             "seats": seat_filter.describe(fresh),
             "url": _booking_url(sch, typ),
         })
+
+    def _launch_booker(self, target: dict, sch: dict, key: str,
+                       group: list[dict]):
+        """크롬에서 좌석 선택까지 진행합니다. 폴링을 막지 않도록 별도 스레드로.
+
+        같은 회차를 반복해서 몰지 않도록 쿨다운을 둡니다.
+        """
+        last = self._last_book.get(key)
+        if last is not None and time.time() - last < BOOK_COOLDOWN:
+            return
+        self._last_book[key] = time.time()
+
+        # 예매할 인원 수. 명시가 없으면 연석 조건(min_consecutive)을 씁니다.
+        # 좌석 묶음이 요청보다 길 수 있으므로(연속 5석 등) 앞에서부터 필요한
+        # 만큼만 넘깁니다. group 길이를 그대로 쓰면 5장을 끊게 됩니다.
+        seats_cfg = target.get("seats") or {}
+        tickets = int(
+            target.get("tickets") or seats_cfg.get("min_consecutive") or 1
+        )
+        seat_locs = [
+            s.get("seatLocNo") for s in group[:tickets] if s.get("seatLocNo")
+        ]
+        if not seat_locs:
+            return
+
+        def run():
+            try:
+                from src import booker
+                booker.book(
+                    sch, seat_locs,
+                    movie_filter=target.get("movie_filter", ""),
+                    screen_filter=target.get("screen_filter", ""),
+                    count=tickets,
+                    pay=bool(target.get("auto_pay")),
+                    # 타겟에 지정된 것만 씁니다. 없으면 QR로 진행합니다.
+                    kakao=target.get("kakaopay"),
+                    confirm_timeout=int(target.get("pay_timeout_sec") or 300),
+                )
+            except Exception as e:
+                print(f"  자동 예매 실패 - {e}")
+
+        threading.Thread(target=run, daemon=True).start()
 
     @staticmethod
     def _schedule_key(name: str, sch: dict, typ: str, ymd: str) -> str:

@@ -33,6 +33,15 @@ targets:
       weekend: ["12:00", "20:00"]
     repeat_alert_sec: 60            # 자리가 열려 있는 동안 60초마다 다시 알림
                                     # (생략하면 새로 풀린 자리일 때만 1회)
+    auto_book: true                 # 크롬을 몰아 좌석 선택까지 진행
+    auto_pay: true                  # 결제 화면까지 진행 (승인은 폰으로 직접)
+    pay_timeout_sec: 300            # 이 시간 안에 승인 안 되면 놓친 것으로 보고
+                                    # 초기 화면으로 빠져나감 (좌석 선점 해제)
+    kakaopay:                       # 카톡결제로 결제요청 (없으면 QR결제)
+      phone: ""                     # 01012345678
+      birth: ""                     # YYMMDD 6자리
+    tickets: 2                      # 예매 인원. 생략하면 min_consecutive 사용
+                                    # 2명 이상이면 첫 좌석만 눌러 연석으로 잡습니다
     seats:                          # 좌석 조건 (생략하면 빈자리 수만 감시)
       rows: ["K", "L", "M", "N"]    # 감시할 열
       seat_no: [16, 29]             # 좌석 번호 범위
@@ -46,3 +55,4 @@ targets:
     screen_filter: "DOLBY"
     movie_filter: "헤일메리"
     mode: cancel
+
