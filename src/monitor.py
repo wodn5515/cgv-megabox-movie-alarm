@@ -643,7 +643,8 @@ class ScheduleMonitor:
                     pay=bool(target.get("auto_pay")),
                     # 타겟에 지정된 것만 씁니다. 없으면 QR로 진행합니다.
                     kakao=target.get("kakaopay"),
-                    confirm_timeout=int(target.get("pay_timeout_sec") or 300),
+                    **({"confirm_timeout": int(target["pay_timeout_sec"])}
+                       if target.get("pay_timeout_sec") else {}),
                 )
                 if ok and once:
                     self._booked.add(name)

@@ -428,6 +428,12 @@ def _mask(value: str) -> str:
 
 
 CONFIRM_POLL_SEC = 10
+# 좌석 선점 시간은 실측 약 5분입니다 (경고 모달이 2분 남을 때 뜨고,
+# 그 뒤 좌석 선택 화면으로 돌아가며 해제됩니다).
+# 카카오페이 화면에 있는 동안은 CGV의 연장 알림을 볼 수 없으므로
+# 만료 직전에 스스로 빠져나오도록 그보다 짧게 잡습니다.
+SEAT_HOLD_SEC = 300
+DEFAULT_CONFIRM_TIMEOUT = 240
 
 
 def _js_kakao_page_confirm() -> str:
@@ -463,7 +469,7 @@ def _kakao_modal_open(tab) -> bool:
     """))
 
 
-def _wait_and_confirm(tab, timeout: int = 300) -> bool:
+def _wait_and_confirm(tab, timeout: int = DEFAULT_CONFIRM_TIMEOUT) -> bool:
     """폰에서 승인을 마치면 브라우저의 '확인'을 눌러 예매를 마무리합니다.
 
     카톡결제는 폰에서 승인해도 브라우저에서 '확인'을 눌러야 예매가 끝납니다.
@@ -473,7 +479,9 @@ def _wait_and_confirm(tab, timeout: int = 300) -> bool:
     이 클릭은 사용자가 이미 결제를 승인한 뒤의 마무리 단계입니다.
     승인 없이는 아무리 눌러도 예매가 되지 않습니다.
     """
-    _log(f"승인 대기 중... 최대 {timeout}초, {CONFIRM_POLL_SEC}초마다 확인합니다.")
+    _log(f"승인 대기 중... 최대 {timeout}초 "
+         f"(좌석 선점 약 {SEAT_HOLD_SEC // 60}분 중 남은 시간), "
+         f"{CONFIRM_POLL_SEC}초마다 확인합니다.")
     _log("(승인은 폰에서 직접 하셔야 합니다. 승인 없이는 예매되지 않습니다.)")
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -500,7 +508,8 @@ def _wait_and_confirm(tab, timeout: int = 300) -> bool:
     return False
 
 
-def _kakao_handoff(tab, identity: dict, confirm_timeout: int = 300) -> bool:
+def _kakao_handoff(tab, identity: dict,
+                   confirm_timeout: int = DEFAULT_CONFIRM_TIMEOUT) -> bool:
     """카카오페이 화면에서 승인 수단을 준비하고 멈춥니다.
 
     휴대폰번호·생년월일이 설정돼 있으면 '카톡결제'로 결제요청을 보냅니다.
@@ -644,7 +653,7 @@ def _request_kakao_pay(tab, identity: dict, confirm_timeout: int) -> bool:
 def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
          screen_filter: str = "", count: int | None = None,
          port: int = 9222, pay: bool = False, kakao=None,
-         confirm_timeout: int = 300) -> bool:
+         confirm_timeout: int = DEFAULT_CONFIRM_TIMEOUT) -> bool:
     """예매 화면을 열어 좌석 선택까지 진행합니다. 결제는 하지 않습니다.
 
     schedule: 모니터가 받은 회차 dict (siteNm, scnYmd, scnsrtTm, movNm 등)
