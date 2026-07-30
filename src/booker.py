@@ -181,15 +181,25 @@ def _stage(tab, schedule: dict, movie: str, screen_filter: str) -> bool:
     tab.wait_for(f"({JS_THEATER_MODAL})||({JS_MOVIE_LIST})", timeout=10)
     _mark("① 페이지 로드")
 
-    if screen_filter:
-        tab.click(js_by_text(screen_filter, tags="button, li, span"), retries=1)
-        _mark("② 특별관 필터")
+    # 예전엔 여기서 특별관(IMAX) 필터를 먼저 눌렀는데, 그러면 극장 목록이
+    # 다시 그려져서 목록이 준비되기 전에 극장을 클릭하게 되고 cold-start에서
+    # 극장 선택이 간헐적으로 실패했습니다. 회차는 뒤에서 상영관 이름으로
+    # 고르므로 이 필터는 필요 없어 제거했습니다. (screen_filter 인자는
+    # 호출부 호환을 위해 남겨둡니다.)
 
     if not _theater_chosen(tab):
-        if not tab.click(
-            _js_modal("지역별", "button, span, li, div, label", theater,
-                      exact=True), until=JS_CONFIRM_BTN, timeout=6
+        # 극장 목록이 실제로 그려질 때까지 기다린 뒤 딱 한 번 클릭합니다.
+        # 준비 전에 누르면 빗나가고, until 실패로 재클릭하면 선택이 토글로
+        # 풀립니다.
+        theater_js = _js_modal("지역별", "button, span, li, div, label",
+                               theater, exact=True)
+        if not tab.wait_for(
+            f"(()=>{{const r=(()=>{{{theater_js}}})();"
+            f"return Array.isArray(r)&&r.length>0;}})()", timeout=8
         ):
+            _log(f"극장 '{theater}' 목록이 나타나지 않았습니다.")
+            return False
+        if not tab.click(theater_js, until=JS_CONFIRM_BTN, timeout=8):
             _log(f"극장 '{theater}' 를 찾지 못했습니다.")
             return False
         _mark("③ 극장 클릭")
@@ -505,51 +515,24 @@ def _int(value) -> int:
         return 0
 
 
-def _bring_seat_into_view(tab, seat_loc_no: str) -> bool:
-    """좌석맵을 끌어서 목표 좌석(메인맵)을 화면 안으로 가져옵니다.
+def _click_seat(tab, loc: str, until: str, timeout: float = 2.4,
+                retries: int = 4) -> bool:
+    """좌석을 HTML(el.click)로 직접 눌러 조건(until)이 참이 될 때까지 재시도.
 
-    좌석맵은 react-zoom-pan-pinch 로 감싸여 있고 overflowX:hidden 이라
-    scrollIntoView 로 움직일 수 없습니다. 맵 폭이 컨테이너보다 넓어서
-    (2090px vs 600px) 바깥쪽 좌석은 잘려 보이지 않습니다.
-
-    그 상태에서는 3px 짜리 미니맵 좌석만 클릭 후보로 남고, 좌표가 조금만
-    어긋나도 옆자리가 선택됩니다(요청과 다른 좌석·다른 가격).
-    실제 드래그로 맵을 옮겨 메인맵 좌석을 정확히 누를 수 있게 합니다.
+    좌석맵은 react-zoom-pan-pinch 로 감싸인 600px 컨테이너인데, 콘텐츠가
+    ~1790px라 좌석 대부분이 화면 밖(x<0)에 놓입니다. 컨테이너는 뷰포트를
+    넓혀도 600px 고정이고 줌아웃도 minScale 0.75에서 막혀 전체를 담을 수
+    없습니다. 좌표 기반 클릭(locate)은 화면 밖 요소를 못 누르므로, 선택할
+    seatLocNo로 요소를 찾아 el.click()으로 위치와 무관하게 누릅니다.
+    (React onClick 이라 합성 클릭으로도 선택이 잡히는 것을 실측 확인.)
     """
-    info = tab.ev(f"""
-      (() => {{
-        const els = [...document.querySelectorAll(
-          'button[data-seatlocno={json.dumps(seat_loc_no)}]')]
-          .filter(e => getComputedStyle(e).visibility !== 'hidden')
-          .sort((a, b) => {{
-            const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
-            return (rb.width * rb.height) - (ra.width * ra.height);
-          }});
-        const el = els[0];
-        const box = document.querySelector('[class*="seatMap_container"]');
-        if (!el || !box) return null;
-        const r = el.getBoundingClientRect(), c = box.getBoundingClientRect();
-        const inside = r.left >= c.left && r.right <= c.right &&
-                       r.top >= c.top && r.bottom <= c.bottom;
-        return JSON.stringify({{
-          inside,
-          seat: [r.x + r.width / 2, r.y + r.height / 2],
-          box: [c.x + c.width / 2, c.y + c.height / 2, c.width, c.height]
-        }});
-      }})()
-    """)
-    if not info:
-        return False
-    d = json.loads(info)
-    if d["inside"]:
-        return True
-
-    sx, sy = d["seat"]
-    cx, cy, _, _ = d["box"]
-    # 좌석을 컨테이너 중앙으로 끌어옵니다.
-    tab.drag(cx, cy, cx + (cx - sx), cy + (cy - sy))
-    time.sleep(0.25)
-    return True
+    for _ in range(retries):
+        if tab.ev(f"!!({until})"):
+            return True
+        tab.js_click(_js_seat(loc))
+        if tab.wait_for(until, timeout=timeout / retries):
+            return True
+    return bool(tab.ev(f"!!({until})"))
 
 
 def _seat_state(tab, seat_loc_no: str) -> str:
@@ -1087,8 +1070,6 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
                 continue
 
             clicks += 1
-            # 메인맵 좌석이 잘려 있으면 맵을 끌어와 정확히 누릅니다.
-            _bring_seat_into_view(tab, loc)
             # '아무 좌석이나 선택됨'이 아니라 '이 좌석이 선택됨'을 봐야 합니다.
             # 제한 좌석은 선택 표시가 남아 있어서 전역 조건에 속습니다.
             js_seat_on = (
@@ -1097,10 +1078,9 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
                 f".some(e=>/select|choice|on\\b|active/i.test("
                 f"(e.className||'').toString()))"
             )
-            # 좌석 맵이 막 열린 직후엔 클릭이 한 번 겉돌 수 있습니다.
-            # 재시도 횟수를 늘려 한 번당 대기를 짧게 잡습니다.
-            if not tab.click(_js_seat(loc), until=js_seat_on, timeout=2.4,
-                             retries=4):
+            # 좌표 대신 el.click()으로 직접 눌러 화면 밖 좌석도 선택합니다.
+            # 좌석 맵이 막 열린 직후엔 한 번 겉돌 수 있어 짧게 여러 번 시도합니다.
+            if not _click_seat(tab, loc, js_seat_on, timeout=2.4, retries=4):
                 # 의도한 좌석이 아니어도 이미 정원만큼 잡혔을 수 있습니다.
                 # 이걸 확인하지 않으면 잡힌 자리를 두고 계속 다른 자리를
                 # 누릅니다.
@@ -1129,8 +1109,8 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
                 blocked.add(loc)
                 # 선택 상태로 남으면 정원을 먹어 다음 좌석을 못 누릅니다.
                 if tab.ev(f"!!({js_seat_on})"):
-                    tab.click(_js_seat(loc), until=f"!({js_seat_on})",
-                              timeout=3, retries=2)
+                    _click_seat(tab, loc, f"!({js_seat_on})",
+                                timeout=3, retries=2)
                 continue
             picked = [x for x in _selected_locnos(tab) if x not in blocked]
             if len(picked) >= count:
@@ -1155,6 +1135,7 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         # 화면까지 밀어둡니다. auto_pay가 없으면 여기서 멈춥니다.
         if not _to_payment_page(tab):
             return False
+        _mark("⑫ 결제수단 화면")
         if not pay:
             _log("결제수단 화면까지 진행했습니다. 결제는 직접 하세요.")
             return "held"   # 선점만 됨 (결제 안 함)
