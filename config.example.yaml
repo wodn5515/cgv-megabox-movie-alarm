@@ -1,9 +1,18 @@
 # 예매 모니터 설정
-max_requests_per_minute: 4
+#
+# max_requests_per_minute 는 사이트별 상한이며 모든 요청(상영일 목록·스케줄·
+# 좌석 배치도)이 여기에 포함됩니다. 루프는 이 상한에 붙어 계속 돌기 때문에
+# 하루 요청량은 이 값이 결정합니다 (30 → 43,200회/일).
+max_requests_per_minute: 30
 
 notifications:
+  # 취소표·예매 오픈 알림이 갈 웹훅
   discord_webhook_url: ""
-  heartbeat_webhook_url: ""   # 비우면 위 웹훅으로 폴백
+
+  # 하트비트(1시간마다 오는 상태 알림)와 워치독 경보를 따로 받을 웹훅.
+  # 비워두면 위 discord_webhook_url으로 같이 갑니다.
+  # 알림 채널을 조용하게 유지하려면 별도 채널 웹훅을 넣으세요.
+  heartbeat_webhook_url: ""
 
   # 텔레그램 푸시 (Discord보다 폰 도달이 빠릅니다)
   # python3 telegram_setup.py <봇토큰> 을 돌리면 chat_id를 찾아줍니다.
@@ -11,52 +20,89 @@ notifications:
     bot_token: ""
     chat_id: ""
 
+# 모니터링 대상
+#
+# type: cgv 또는 megabox   (CGV: site_no / 메가박스: branch_no)
+# mode: open(기본, 예매 오픈 감시) 또는 cancel(취소표 감시)
+# dates: all | {from, to} | 목록 | date 단일   (메가박스는 목록만)
+# screen_filter: 상영관 타입 (IMAX, DOLBY, 4DX, SCREENX 등)
+# movie_filter: 영화명 키워드 (일부만 적어도 매칭)
+#
+# 좌석 위치 조건(seats)과 자동 예매는 CGV 전용입니다.
 targets:
-  # 1) 예매 오픈 감시 (mode 생략 시 기본값)
-  - name: "용산 IMAX 헤일메리 4/20"
+  # 1) 예매 오픈 감시 — 스케줄이 등장하면 알림
+  - name: "용산 IMAX 헤일메리 오픈"
     type: cgv
     site_no: "0013"
     date: "20260420"
     screen_filter: "IMAX"
     movie_filter: "헤일메리"
 
-  # 2) 취소표 감시 — 날짜 전체 + 요일별 시간대 + 좌석 위치 (CGV 전용)
+  # 2) 취소표 감시 + 자동 예매 (실제로 쓰는 형태)
   - name: "용산 IMAX 오디세이 취소표"
     type: cgv
     site_no: "0013"
-    dates: all                      # 예매 열린 상영일 전체 (날짜 목록도 가능)
+    dates:                          # 8/10 ~ 8/18
+      from: "20260810"
+      to: "20260818"
     screen_filter: "IMAX"
     movie_filter: "오디세이"
     mode: cancel
-    time_rules:                     # 평일/주말을 나눠 지정 (공휴일은 주말 취급)
-      weekday: ["19:00", "23:59"]
-      weekend: ["12:00", "20:00"]
+    time_range: ["18:00", "21:30"]  # 요일 구분 없이 18:00~21:30 회차
     repeat_alert_sec: 60            # 자리가 열려 있는 동안 60초마다 다시 알림
-                                    # (생략하면 새로 풀린 자리일 때만 1회)
-    auto_book: true                 # 크롬을 몰아 좌석 선점 → 결제수단 화면까지
-    auto_pay: true                  # 카카오페이 결제요청까지 (승인은 폰으로 직접)
-    auto_book_once: true            # 기본값. 한 번 성공하면 더 잡지 않습니다.
-                                    # false 로 두면 조건이 맞을 때마다 반복
-                                    # 예매합니다(표를 여러 장 살 수 있음).
-    pay_timeout_sec: 240            # 승인 대기 시간. 이 시간 안에 승인 안 되면
-                                    # 초기 화면으로 빠져나감 (좌석 선점 해제).
-                                    # 좌석 선점이 약 5분이라 그보다 짧게 둡니다.
-    kakaopay:                       # 카톡결제로 결제요청 (없으면 QR결제)
+                                    # (지우거나 0이면 새로 풀린 자리일 때만 1회)
+    seats:
+      rows: ["K", "L", "M", "N"]    # 감시할 열
+      seat_no: [16, 29]             # 좌석 번호 범위 ([16] 이면 16번 이상)
+      min_consecutive: 2            # 나란히 붙어있어야 하는 최소 좌석 수
+    tickets: 2                      # 예매 인원. 2명 이상이면 첫 좌석만 눌러
+                                    # CGV의 연석 자동 선택에 맡깁니다.
+    auto_book: true                 # 좌석 선점 → 결제수단 화면까지
+    auto_pay: true                  # 카카오페이 결제요청까지 (승인은 폰으로)
+    auto_book_once: true            # 기본값. 결제까지 완료되면 그 타겟 감시를
+                                    # 중단합니다(알림도 안 옴).
+                                    # false 면 조건이 맞을 때마다 반복 예매해
+                                    # 표를 여러 장 살 수 있습니다.
+    pay_timeout_sec: 240            # 승인 대기. 좌석 선점이 약 5분이라
+                                    # 그보다 짧게 두고, 초과하면 초기 화면으로
+                                    # 빠져나가 좌석을 풀어줍니다.
+    kakaopay:                       # 채우면 카톡으로 결제요청이 옵니다.
       phone: ""                     # 01012345678
       birth: ""                     # YYMMDD 6자리
-    tickets: 2                      # 예매 인원. 생략하면 min_consecutive 사용
-                                    # 2명 이상이면 첫 좌석만 눌러 연석으로 잡습니다
-    seats:                          # 좌석 조건 (생략하면 빈자리 수만 감시)
-      rows: ["K", "L", "M", "N"]    # 감시할 열
-      seat_no: [16, 29]             # 좌석 번호 범위
-      min_consecutive: 2            # 나란히 붙어있어야 하는 최소 좌석 수
+                                    # 비워두면 QR결제 탭을 띄웁니다.
+                                    # 환경변수 CGV_KAKAO_PHONE /
+                                    # CGV_KAKAO_BIRTH 로도 지정할 수 있고,
+                                    # kakaopay: true 로 두면 그것만 씁니다.
 
-  # 3) 취소표 감시 — 메가박스는 잔여 좌석 "수"로만 감시
-  - name: "코엑스 DOLBY 헤일메리 5/1 취소표"
+  # 3) 같은 극장의 다른 영화 — 1자리도 알림, 1장만 예매
+  - name: "용산 IMAX 스파이더맨 취소표"
+    type: cgv
+    site_no: "0013"
+    dates: ["20260801", "20260802"]
+    screen_filter: "IMAX"
+    movie_filter: "스파이더맨"
+    mode: cancel
+    time_range: ["13:00", "19:00"]
+    repeat_alert_sec: 60
+    seats:
+      rows: ["K", "L", "M", "N"]
+      seat_no: [16, 29]
+      min_consecutive: 1            # 1자리만 나와도 알림
+    tickets: 1
+    auto_book: true
+    auto_pay: true
+    auto_book_once: true
+    pay_timeout_sec: 240
+    kakaopay:
+      phone: ""
+      birth: ""
+
+  # 4) 메가박스 — 잔여 좌석 "수"로만 감시 (좌석 위치·자동 예매 미지원)
+  - name: "코엑스 DOLBY 헤일메리 취소표"
     type: megabox
     branch_no: "1351"
     date: "20260501"
     screen_filter: "DOLBY"
     movie_filter: "헤일메리"
     mode: cancel
-
+    repeat_alert_sec: 60

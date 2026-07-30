@@ -50,6 +50,20 @@ def _log(msg: str):
     print(f"  [예매] {msg}", flush=True)
 
 
+# 단계별 소요 시간 측정용. BOOK_TRACE=1 이면 각 단계를 찍습니다.
+_TRACE = os.environ.get("BOOK_TRACE") == "1"
+_trace_t0 = [0.0]
+
+
+def _mark(step: str):
+    if not _TRACE:
+        return
+    now = time.time()
+    if _trace_t0[0]:
+        print(f"    ⏱ {step}: +{now - _trace_t0[0]:.2f}s", flush=True)
+    _trace_t0[0] = now
+
+
 def _theater_name(schedule: dict) -> str:
     """'CGV 용산아이파크몰' → '용산아이파크몰'"""
     return (schedule.get("siteNm") or "").replace("CGV", "").strip()
@@ -101,6 +115,97 @@ def _movie_list_open(tab) -> bool:
         .filter(m => (m.offsetWidth || m.offsetHeight))
         .some(m => m.querySelector('ul[class*="mvList"] button'))
     """))
+
+
+def _staged(tab, movie: str, ymd: str) -> bool:
+    """이미 그 영화·날짜의 회차 목록이 떠 있는 상태인지 확인합니다.
+
+    맞으면 페이지를 다시 열지 않고 회차 클릭부터 진행할 수 있습니다.
+    첫 페이지 로드가 전체 시간의 대부분이라 이 판정이 속도를 좌우합니다.
+    """
+    month, day = int(ymd[4:6]), int(ymd[6:8])
+    return bool(tab.ev(rf"""
+      (() => {{
+        if (!location.href.includes('/cnm/movieBook/movie')) return false;
+        if (!document.body.innerText.includes({json.dumps(movie)})) return false;
+        if (!document.querySelectorAll('[class*="screenInfo_timeItem"]').length)
+          return false;
+        // 활성 날짜가 목표 날짜인지
+        const act = [...document.querySelectorAll('[class*="dayScroll_scrollItem"]')]
+          .filter(e => /itemActive/.test((e.className || '').toString()))
+          .map(e => (e.innerText || '').trim().replace(/\s+/g, ' '));
+        return act.some(t => {{
+          const m = t.match(/(?:(\d{{1,2}})\.)?(\d{{1,2}})$/);
+          if (!m) return false;
+          if (m[1] !== undefined && Number(m[1]) !== {month}) return false;
+          return Number(m[2]) === {day};
+        }});
+      }})()
+    """))
+
+
+def prepare(schedule: dict, movie_filter: str = "", screen_filter: str = "",
+            port: int = 9222) -> bool:
+    """예매 화면을 회차 목록까지 미리 열어둡니다 (예열).
+
+    취소표가 뜬 뒤 첫 페이지 로드에 4초 가까이 쓰이므로, 미리 이 상태로
+    대기해두면 회차 클릭부터 시작할 수 있습니다.
+    """
+    try:
+        tab = Tab(port=port)
+    except ChromeNotRunning:
+        return False
+    try:
+        return _stage(tab, schedule, movie_filter, screen_filter)
+    except Exception:
+        return False
+    finally:
+        tab.close()
+
+
+def _stage(tab, schedule: dict, movie: str, screen_filter: str) -> bool:
+    """극장 → 영화 → 날짜까지 진행해 회차 목록을 띄웁니다."""
+    ymd = schedule.get("scnYmd", "")
+    theater = _theater_name(schedule)
+    movie = movie or schedule.get("movNm", "")
+
+    if _staged(tab, movie, ymd):
+        return True
+
+    tab.goto(BOOK_URL)
+    tab.wait_for(f"({JS_THEATER_MODAL})||({JS_MOVIE_LIST})", timeout=10)
+
+    if screen_filter:
+        tab.click(js_by_text(screen_filter, tags="button, li, span"), retries=1)
+
+    if not _theater_chosen(tab):
+        if not tab.click(
+            _js_modal("지역별", "button, span, li, div, label", theater,
+                      exact=True), until=JS_CONFIRM_BTN, timeout=6
+        ):
+            _log(f"극장 '{theater}' 를 찾지 못했습니다.")
+            return False
+        if not tab.click(_js_modal("지역별", "button", "극장선택", exact=True),
+                         until=JS_THEATER_OK, timeout=8, retries=2):
+            _log(f"극장 '{theater}' 가 선택되지 않았습니다.")
+            return False
+
+    if not _movie_list_open(tab):
+        tab.click(js_by_text("전체보기", tags="button, a"),
+                  until=JS_MOVIE_LIST, timeout=5, retries=1)
+    if _movie_list_open(tab):
+        if not tab.click(_js_movie_in_list(movie),
+                         until=JS_DATES_READY, timeout=8):
+            _log(f"영화 '{movie}' 를 목록에서 찾지 못했습니다.")
+            return False
+    else:
+        _log("영화 목록을 열지 못했습니다.")
+        return False
+
+    if not tab.click(_js_date_item(ymd), until=JS_SHOWTIMES, timeout=8):
+        _log(f"날짜 {ymd} 를 선택하지 못했습니다.")
+        return False
+    return True
 
 
 def _theater_chosen(tab) -> bool:
@@ -229,35 +334,59 @@ def _js_seat(seat_loc_no: str) -> str:
     """
 
 
-def _restriction_modal(tab) -> str:
-    """좌석 클릭 후 뜨는 예매 제한 안내를 읽습니다. 없으면 빈 문자열.
+# 좌석 클릭 후 뜰 수 있는 차단 모달들. 특정 문구를 나열하면 새로운 안내를
+# 놓치고, 놓치면 모달이 화면을 덮은 채 이후 클릭이 전부 막힙니다.
+# 그래서 '확인/닫기 버튼만 있는 알림성 모달'을 통째로 잡습니다.
+JS_ALERT_MODAL = r"""
+  [...document.querySelectorAll('.cgv-modal.active')]
+    .filter(e => e.offsetWidth || e.offsetHeight)
+    .filter(e => {
+      const btns = [...e.querySelectorAll('button, a')]
+        .map(b => (b.innerText || '').trim());
+      return btns.length && btns.length <= 3 &&
+             btns.every(t => ['확인', '닫기', '취소'].includes(t));
+    })
+"""
 
-    휠체어 전용석처럼 목록에는 '판매 가능'으로 나오지만 실제로는 일반
-    고객이 살 수 없는 좌석이 있습니다. 좌석 조회 API는 이런 좌석도
-    stkndCd=01(일반석)로 내려주므로 화면 안내로만 알 수 있습니다.
-    """
-    return tab.ev(r"""
-      (() => {
-        const m = [...document.querySelectorAll('.cgv-modal.active')]
-          .filter(e => e.offsetWidth || e.offsetHeight)
-          .find(e => /제한|불가|이용하실 수 없/.test(e.innerText || ''));
+
+def _blocking_alert(tab) -> str:
+    """좌석 클릭을 막는 알림 모달의 문구를 읽습니다. 없으면 빈 문자열."""
+    return tab.ev(rf"""
+      (() => {{
+        const m = ({JS_ALERT_MODAL}).pop();
         return m ? (m.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 80) : '';
-      })()
+      }})()
     """) or ""
 
 
-def _dismiss_restriction(tab) -> bool:
-    """제한 안내 모달을 닫습니다."""
-    return tab.click(r"""
+def _dismiss_alert(tab) -> bool:
+    """알림 모달을 닫습니다."""
+    return tab.click(rf"""
       const norm = s => (s || '').trim().replace(/\s+/g, ' ');
-      const m = [...document.querySelectorAll('.cgv-modal.active')]
-        .filter(e => e.offsetWidth || e.offsetHeight)
-        .find(e => /제한|불가|이용하실 수 없/.test(e.innerText || ''));
+      const m = ({JS_ALERT_MODAL}).pop();
       if (!m) return null;
       return [...m.querySelectorAll('button, a')]
         .filter(e => ['확인', '닫기'].includes(norm(e.innerText)));
-    """, until="!document.querySelector('.cgv-modal.active')", timeout=4,
-        retries=2)
+    """, until=f"!(({JS_ALERT_MODAL}).length)", timeout=4, retries=2)
+
+
+def _seat_state(tab, seat_loc_no: str) -> str:
+    """좌석 버튼의 실제 상태를 진단용으로 읽습니다.
+
+    '누르지 못했다'가 팔린 것인지, 맵이 안 열린 것인지, 셀렉터가 어긋난
+    것인지 구분하려면 이 정보가 필요합니다.
+    """
+    return tab.ev(f"""
+      (() => {{
+        const all = [...document.querySelectorAll(
+          'button[data-seatlocno={json.dumps(seat_loc_no)}]')];
+        if (!all.length) return '좌석 요소 없음';
+        const vis = all.filter(e => getComputedStyle(e).visibility !== 'hidden');
+        if (!vis.length) return '좌석 맵 미개방';
+        if (vis.every(e => e.disabled)) return '판매됨(disabled)';
+        return '클릭 가능하나 반응 없음';
+      }})()
+    """) or "확인 불가"
 
 
 def _selected_locnos(tab) -> list[str]:
@@ -680,46 +809,12 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         tab.front()
         _log(f"{theater} {ymd} {hhmm} {movie} · 좌석 {len(seat_loc_nos)}개")
 
-        tab.goto(BOOK_URL)
-        time.sleep(1.5)
-
-        # 극장을 먼저 고릅니다. 극장 모달이 영화 모달을 덮고 있어서
-        # 순서를 바꾸면 영화를 누를 수 없습니다.
-        #
-        # 자주가는 극장에 등록해두어도 이 경로로 들어오면 매번 미선택
-        # 상태이므로, 들어올 때마다 골라야 합니다.
-        # ('지역별'은 극장 모달에만 있는 문구입니다. '검색'은 영화 모달에도
-        #  있어서 모달을 특정하는 마커로 쓸 수 없습니다.)
-        if not _theater_chosen(tab):
-            if not tab.click(
-                _js_modal("지역별", "button, span, li, div, label", theater,
-                          exact=True), until=JS_CONFIRM_BTN, timeout=6
-            ):
-                _log(f"극장 '{theater}' 를 찾지 못했습니다.")
-                return False
-            if not tab.click(_js_modal("지역별", "button", "극장선택",
-                                       exact=True),
-                             until=JS_THEATER_OK, timeout=8, retries=2):
-                _log(f"극장 '{theater}' 가 선택되지 않았습니다.")
-                return False
-
-        # 영화 목록이 안 열려 있으면 '전체보기'로 엽니다.
-        if not _movie_list_open(tab):
-            tab.click(js_by_text("전체보기", tags="button, a"),
-                      until=JS_MOVIE_LIST, timeout=5, retries=1)
-
-        if _movie_list_open(tab):
-            if not tab.click(_js_movie_in_list(movie),
-                             until=JS_DATES_READY, timeout=8):
-                _log(f"영화 '{movie}' 를 목록에서 찾지 못했습니다.")
-                return False
-        else:
-            _log("영화 목록을 열지 못했습니다.")
+        _mark("시작")
+        # 극장 → 영화 → 날짜까지. 이미 그 상태면(예열) 즉시 지나갑니다.
+        # 첫 페이지 로드가 전체 시간의 대부분이라 여기가 관건입니다.
+        if not _stage(tab, schedule, movie, screen_filter):
             return False
-
-        if not tab.click(_js_date_item(ymd), until=JS_SHOWTIMES, timeout=8):
-            _log(f"날짜 {ymd} 를 선택하지 못했습니다.")
-            return False
+        _mark("준비")
 
         # URL은 페이지가 조작 가능해지기 전에 바뀝니다. 인원 버튼이 실제로
         # 렌더될 때까지 기다려야 다음 클릭이 먹습니다.
@@ -732,6 +827,7 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             _log(f"{hhmm} 회차를 선택하지 못했습니다 (매진되었을 수 있습니다).")
             return False
 
+        _mark("회차 선택")
         js_count_on = (
             f"[...document.querySelectorAll('button[aria-label$=\"선택\"]')]"
             f".some(e=>e.getAttribute('aria-label')==='{count} 선택'"
@@ -743,9 +839,12 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             _log(f"인원 {count}명을 선택하지 못했습니다.")
             return False
 
+        _mark("인원 선택")
         # 좌석 맵 열기. 반영이 늦을 때가 있어 열릴 때까지 확인합니다.
         for _ in range(6):
             if _seat_map_open(tab):
+                # 맵이 보이자마자 클릭하면 겉도는 경우가 있어 아주 짧게 둡니다.
+                time.sleep(0.15)
                 break
             tab.click(_js_open_seat_map(), until=JS_SEATMAP_OPEN, timeout=3,
                       retries=1)
@@ -755,6 +854,7 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
 
         # 인원이 2명 이상이면 첫 좌석만 누르면 CGV가 옆자리까지 자동으로
         # 잡아줍니다. 그래서 하나 누른 뒤 모자란 만큼만 추가로 누릅니다.
+        _mark("좌석 맵 열기")
         picked: list[str] = []
         blocked: set[str] = set()   # 예매 제한으로 쓸 수 없는 좌석
         for loc in seat_loc_nos:
@@ -768,18 +868,35 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
                 f".some(e=>/select|choice|on\\b|active/i.test("
                 f"(e.className||'').toString()))"
             )
-            if not tab.click(_js_seat(loc), until=js_seat_on, timeout=4,
-                             retries=2):
-                _log(f"좌석 {loc} 을 누르지 못했습니다 (이미 팔렸을 수 있습니다).")
+            # 좌석 맵이 막 열린 직후엔 클릭이 한 번 겉돌 수 있습니다.
+            # 재시도 횟수를 늘려 한 번당 대기를 짧게 잡습니다.
+            if not tab.click(_js_seat(loc), until=js_seat_on, timeout=2.4,
+                             retries=4):
+                # 모달이 덮고 있어서 못 눌린 것일 수 있습니다.
+                if (msg := _blocking_alert(tab)):
+                    _dismiss_alert(tab)
+                    already = _selected_locnos(tab)
+                    if len(already) >= count:
+                        _log(f"안내 — {msg}")
+                        picked = [x for x in already if x not in blocked]
+                        break
+                    _log(f"좌석 {loc} 실패 — {msg}")
+                else:
+                    _log(f"좌석 {loc} 실패 — {_seat_state(tab, loc)}")
                 continue
-            # 휠체어 전용석 등 예매 제한 좌석이면 안내가 뜹니다.
-            # 안내를 닫고 다음 후보 좌석으로 넘어갑니다.
-            if (msg := _restriction_modal(tab)):
-                _log(f"좌석 {loc} 예매 제한 — {msg}")
-                _dismiss_restriction(tab)
+            # 휠체어 전용석 제한, 인원 초과 등 안내가 뜨면 닫고 판단합니다.
+            # 닫지 않으면 모달이 화면을 덮어 이후 클릭이 전부 막힙니다.
+            if (msg := _blocking_alert(tab)):
+                _dismiss_alert(tab)
+                already = _selected_locnos(tab)
+                if len(already) >= count:
+                    # 이미 정원만큼 잡혀 있습니다 ("관람인원은 N명입니다" 등)
+                    _log(f"안내 — {msg}")
+                    picked = [x for x in already if x not in blocked]
+                    break
+                _log(f"좌석 {loc} 실패 — {msg}")
                 blocked.add(loc)
-                # 제한 좌석이 선택 상태로 남으면 인원 정원을 먹어서 다음
-                # 좌석을 누를 수 없습니다. 다시 눌러 해제합니다.
+                # 선택 상태로 남으면 정원을 먹어 다음 좌석을 못 누릅니다.
                 if tab.ev(f"!!({js_seat_on})"):
                     tab.click(_js_seat(loc), until=f"!({js_seat_on})",
                               timeout=3, retries=2)
@@ -794,6 +911,7 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         if len(picked) != count:
             _log(f"좌석 {len(picked)}/{count}석만 선택됐습니다. 화면에서 확인하세요.")
 
+        _mark("좌석 클릭")
         ok, summary = verify_summary(tab, schedule, len(picked))
         _log(f"검증: {summary}")
         if not ok:
@@ -808,9 +926,10 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             return False
         if not pay:
             _log("결제수단 화면까지 진행했습니다. 결제는 직접 하세요.")
-            return True
+            return "held"   # 선점만 됨 (결제 안 함)
 
-        return _request_kakao_pay(tab, kakao_identity(kakao), confirm_timeout)
+        return ("paid" if _request_kakao_pay(
+            tab, kakao_identity(kakao), confirm_timeout) else "held")
 
     except Exception as e:
         _log(f"진행 중 오류 - {e}")
