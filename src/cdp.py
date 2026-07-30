@@ -75,7 +75,7 @@ class Tab:
         self.send("Page.navigate", url=url)
         deadline = time.time() + timeout
         while time.time() < deadline:
-            time.sleep(0.4)
+            time.sleep(0.1)
             try:
                 if self.ev("document.readyState") == "complete":
                     return self.ev("location.href")
@@ -125,16 +125,45 @@ class Tab:
         """)
         return json.loads(raw) if raw else None
 
-    def click(self, js_finder: str, wait: float = 2.0,
-              retries: int = 3) -> bool:
-        """요소를 찾아 클릭합니다. 렌더링을 기다리며 재시도합니다."""
+    def wait_for(self, js_bool: str, timeout: float = 8.0,
+                 interval: float = 0.08) -> bool:
+        """조건이 참이 될 때까지 짧은 간격으로 확인합니다.
+
+        고정 sleep 대신 이것을 쓰면 대부분의 단계가 100~300ms에 끝납니다.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                if self.ev(f"!!({js_bool})"):
+                    return True
+            except RuntimeError:
+                pass  # 내비게이션 중 컨텍스트 교체
+            time.sleep(interval)
+        return False
+
+    def click(self, js_finder: str, wait: float = 0.0, retries: int = 3,
+              until: str | None = None, timeout: float = 8.0) -> bool:
+        """요소를 찾아 클릭합니다.
+
+        until에 JS 조건을 주면 그 조건이 참이 될 때까지 기다립니다.
+        없으면 wait초만 쉽니다(가급적 until을 쓰세요).
+        """
         for attempt in range(retries):
             spot = self.locate(js_finder)
             if spot:
                 self.click_point(spot["x"], spot["y"])
-                time.sleep(wait)
-                return True
-            time.sleep(1.0 + attempt)
+                if not until:
+                    if wait:
+                        time.sleep(wait)
+                    return True
+                # 조건이 참이 되면 성공. 아니면 클릭이 먹지 않은 것으로 보고
+                # 다시 시도합니다 (React가 아직 이벤트를 못 받는 경우가 있음).
+                per_try = timeout / retries
+                if self.wait_for(until, timeout=per_try):
+                    return True
+            # 아직 렌더링 안 됐을 수 있으니 짧게 기다렸다 재시도
+            if attempt < retries - 1:
+                time.sleep(0.25 * (attempt + 1))
         return False
 
     def type_into(self, css: str, value: str, wait: float = 0.6) -> bool:
