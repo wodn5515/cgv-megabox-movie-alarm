@@ -391,6 +391,7 @@ def _wait_and_confirm(tab, timeout: int = 300) -> bool:
     승인 없이는 아무리 눌러도 예매가 되지 않습니다.
     """
     _log(f"승인 대기 중... 최대 {timeout}초, {CONFIRM_POLL_SEC}초마다 확인합니다.")
+    _log("(승인은 폰에서 직접 하셔야 합니다. 승인 없이는 예매되지 않습니다.)")
     deadline = time.time() + timeout
     while time.time() < deadline:
         url = tab.ev("location.href") or ""
@@ -433,8 +434,10 @@ def _kakao_handoff(tab, identity: dict, confirm_timeout: int = 300) -> bool:
             _log("카카오페이 QR이 표시되었습니다. 폰으로 스캔해 승인하세요.")
         else:
             _log("카카오페이 결제 화면입니다 (QR결제/카톡결제를 직접 고르세요).")
-        _log("(여기서 멈춥니다. 결제 승인은 진행하지 않습니다.)")
-        return True
+        # QR 화면에는 '확인' 버튼이 보이지 않지만, 스캔 후 마무리 클릭이
+        # 필요한지 확인되지 않았습니다. 같은 대기 루프를 돌립니다.
+        # 버튼이 없으면 URL 변화만 감시하므로 무해합니다.
+        return _wait_and_confirm(tab, confirm_timeout)
 
     if not tab.click(js_by_text("카톡결제", tags="button, a, li, span, div"),
                      wait=2.5):
