@@ -110,7 +110,10 @@ class Tab:
           const list = Array.isArray(found) ? found : [found];
           for (const el of list) {{
             if (!el || !(el.offsetWidth || el.offsetHeight)) continue;
-            el.scrollIntoView({{block: 'center', inline: 'center'}});
+            // behavior:'instant' 가 없으면 부드러운 스크롤 때문에
+            // 아직 도착하지 않은 위치의 좌표를 읽어 엉뚱한 곳을 누릅니다.
+            el.scrollIntoView({{block: 'center', inline: 'center',
+                                behavior: 'instant'}});
             const b = el.getBoundingClientRect();
             if (!b.width || !b.height) continue;
             const cx = b.x + b.width / 2, cy = b.y + b.height / 2;
@@ -124,6 +127,29 @@ class Tab:
         }})()
         """)
         return json.loads(raw) if raw else None
+
+    def js_click(self, js_finder: str) -> bool:
+        """좌표 없이 요소를 직접 el.click()으로 누릅니다.
+
+        locate()는 화면 밖(x<0)이거나 히트테스트에 걸리는 요소를 건너뜁니다.
+        좌석맵은 컨테이너(600px)보다 넓어 대부분의 좌석이 화면 밖에 놓이므로
+        좌표 클릭이 불가능합니다. 선택할 좌석의 seatLocNo를 이미 알고 있으니
+        요소를 찾아 el.click()으로 위치와 무관하게 누릅니다. (React onClick
+        이라 합성 클릭으로도 선택이 잡히는 것을 실측으로 확인했습니다.)
+
+        js_finder는 요소(또는 요소 배열)를 반환하는 JS 표현식입니다.
+        배열이면 첫 요소를 누릅니다(_js_seat은 메인맵을 앞에 둡니다).
+        """
+        return bool(self.ev(f"""
+          (() => {{
+            const found = (() => {{ {js_finder} }})();
+            if (!found) return false;
+            const el = Array.isArray(found) ? found[0] : found;
+            if (!el) return false;
+            el.click();
+            return true;
+          }})()
+        """))
 
     def wait_for(self, js_bool: str, timeout: float = 8.0,
                  interval: float = 0.08) -> bool:
