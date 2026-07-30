@@ -600,6 +600,7 @@ class ScheduleMonitor:
                     pay=bool(target.get("auto_pay")),
                     # 타겟에 지정된 것만 씁니다. 없으면 QR로 진행합니다.
                     kakao=target.get("kakaopay"),
+                    confirm_timeout=int(target.get("pay_timeout_sec") or 300),
                 )
             except Exception as e:
                 print(f"  자동 예매 실패 - {e}")
