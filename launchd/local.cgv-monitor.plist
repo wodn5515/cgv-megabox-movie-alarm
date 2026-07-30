@@ -15,13 +15,13 @@
          EX_CONFIG(78)로 죽습니다. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/move/Desktop/cj/cgv-imax-automation/venv/bin/python</string>
+        <string>__PYTHON__</string>
         <string>-u</string>
         <string>main.py</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/move/Desktop/cj/cgv-imax-automation</string>
+    <string>__WORKDIR__</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -39,8 +39,8 @@
     <integer>30</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/move/Library/Logs/cgv-monitor/monitor.log</string>
+    <string>__LOGDIR__/monitor.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/move/Library/Logs/cgv-monitor/monitor.log</string>
+    <string>__LOGDIR__/monitor.log</string>
 </dict>
 </plist>
