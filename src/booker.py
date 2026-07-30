@@ -58,6 +58,39 @@ def _js_modal(marker: str, inner_selector: str, want: str,
     """
 
 
+def _js_movie_in_list(movie: str) -> str:
+    """영화 목록 모달 안에서 해당 영화 버튼을 찾는 JS.
+
+    텍스트 마커로 모달을 고르면 안 됩니다. '검색'은 영화 모달과 극장 모달
+    양쪽에 있어서 잘못된 모달을 잡습니다. mvList를 품은 모달로 특정합니다.
+    """
+    return f"""
+      const want = {json.dumps(movie)};
+      const modal = [...document.querySelectorAll('.cgv-modal')]
+        .filter(m => (m.offsetWidth || m.offsetHeight))
+        .filter(m => m.querySelector('ul[class*="mvList"]'))
+        .pop();
+      if (!modal) return null;
+      return [...modal.querySelectorAll('ul[class*="mvList"] button')]
+        .filter(e => (e.innerText || '').includes(want));
+    """
+
+
+def _movie_list_open(tab) -> bool:
+    return bool(tab.ev("""
+      [...document.querySelectorAll('.cgv-modal')]
+        .filter(m => (m.offsetWidth || m.offsetHeight))
+        .some(m => m.querySelector('ul[class*="mvList"] button'))
+    """))
+
+
+def _theater_chosen(tab) -> bool:
+    """극장이 실제로 선택됐는지 확인합니다."""
+    return not bool(tab.ev("""
+      document.body.innerText.includes('선택 된 극장이 없습니다')
+    """))
+
+
 def _js_modal_present(marker: str) -> str:
     return f"""
       const marker = {json.dumps(marker)};
@@ -570,29 +603,34 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         tab.goto(BOOK_URL)
         time.sleep(1.5)
 
-        # 극장 모달이 영화 모달을 덮고 있으므로 극장을 먼저 처리합니다.
-        if _modal_open(tab, "지역별"):
-            if not tab.click(
-                _js_modal("지역별", "button, span, li, div, label", theater,
-                          exact=True), wait=2.0
-            ):
-                _log(f"극장 '{theater}' 를 찾지 못했습니다.")
-                return False
-            tab.click(_js_modal("지역별", "button", "극장선택", exact=True),
-                      wait=3.0, retries=2)
+        # 극장은 예매용 크롬에서 미리 골라둔 것을 씁니다.
+        #
+        # 극장 선택 모달을 자동으로 다루려 했지만 교착이 있습니다.
+        # 극장이 선택되지 않은 상태로 이 페이지에 들어가면 영화 모달과
+        # 극장 모달이 같은 z-index로 동시에 뜨고, 위에 오는 극장 모달은
+        # 영화가 선택되기 전에는 극장을 눌러도 선택 칩과 '극장선택' 버튼이
+        # 생기지 않습니다. 반대로 영화는 극장 모달에 덮여 누를 수 없습니다.
+        #
+        # 그래서 준비 단계로 분리했습니다. 예매용 크롬에서 한 번 극장을
+        # 고르면 프로필에 남아 이후로는 이 분기를 타지 않습니다.
+        if not _theater_chosen(tab):
+            _log(f"예매용 크롬에 극장이 선택돼 있지 않습니다.")
+            _log(f"그 창에서 '{theater}'을 한 번 골라두세요 "
+                 f"(자주가는 CGV 목록 수정 → 극장 선택). 이후로는 유지됩니다.")
+            return False
 
-        # 영화 모달이 안 열려 있으면 '전체보기'로 엽니다.
-        if not _modal_open(tab, "검색"):
-            tab.click(js_by_text("전체보기", tags="button, a"), wait=2.0,
+        # 영화 목록이 안 열려 있으면 '전체보기'로 엽니다.
+        if not _movie_list_open(tab):
+            tab.click(js_by_text("전체보기", tags="button, a"), wait=2.5,
                       retries=1)
 
-        if _modal_open(tab, "검색"):
-            if not tab.click(
-                _js_modal("검색", 'ul[class*="mvList"] button', movie),
-                wait=3.5
-            ):
+        if _movie_list_open(tab):
+            if not tab.click(_js_movie_in_list(movie), wait=3.5):
                 _log(f"영화 '{movie}' 를 목록에서 찾지 못했습니다.")
                 return False
+        else:
+            _log("영화 목록을 열지 못했습니다.")
+            return False
 
         if not tab.click(_js_date_item(ymd), wait=3.0):
             _log(f"날짜 {ymd} 를 선택하지 못했습니다.")

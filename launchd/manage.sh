@@ -15,11 +15,27 @@ AGENTS="$HOME/Library/LaunchAgents"
 LOGDIR="$HOME/Library/Logs/cgv-monitor"
 LABELS=(local.cgv-monitor local.cgv-watchdog)
 
+loaded() {
+    launchctl print "gui/$UID/$1" >/dev/null 2>&1
+}
+
+# bootout은 비동기입니다. 언로드가 끝나기 전에 bootstrap을 호출하면
+# 라벨이 아직 남아 있어 "Bootstrap failed: 5: Input/output error"가 납니다.
 boot_out() {
     launchctl bootout "gui/$UID/$1" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+        loaded "$1" || return 0
+        sleep 0.3
+    done
+    echo "경고: $1 언로드가 끝나지 않았습니다" >&2
+    return 1
 }
 
 boot_in() {
+    if loaded "$1"; then
+        echo "이미 등록됨: $1 (restart를 쓰세요)" >&2
+        return 1
+    fi
     launchctl bootstrap "gui/$UID" "$AGENTS/$1.plist"
 }
 
