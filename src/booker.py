@@ -117,31 +117,35 @@ def _movie_list_open(tab) -> bool:
     """))
 
 
-def _staged(tab, movie: str, ymd: str) -> bool:
-    """이미 그 영화·날짜의 회차 목록이 떠 있는 상태인지 확인합니다.
+def _staged(tab, movie: str) -> bool:
+    """그 영화의 회차 목록이 떠 있는 상태인지 확인합니다.
 
-    맞으면 페이지를 다시 열지 않고 회차 클릭부터 진행할 수 있습니다.
-    첫 페이지 로드가 전체 시간의 대부분이라 이 판정이 속도를 좌우합니다.
+    날짜는 보지 않습니다. 비싼 것은 첫 페이지 로드(약 4초)이고 날짜
+    클릭은 0.13초라, 날짜별로 예열하면 브라우저만 계속 헤집게 됩니다.
     """
-    month, day = int(ymd[4:6]), int(ymd[6:8])
     return bool(tab.ev(rf"""
       (() => {{
         if (!location.href.includes('/cnm/movieBook/movie')) return false;
         if (!document.body.innerText.includes({json.dumps(movie)})) return false;
-        if (!document.querySelectorAll('[class*="screenInfo_timeItem"]').length)
-          return false;
-        // 활성 날짜가 목표 날짜인지
-        const act = [...document.querySelectorAll('[class*="dayScroll_scrollItem"]')]
-          .filter(e => /itemActive/.test((e.className || '').toString()))
-          .map(e => (e.innerText || '').trim().replace(/\s+/g, ' '));
-        return act.some(t => {{
-          const m = t.match(/(?:(\d{{1,2}})\.)?(\d{{1,2}})$/);
-          if (!m) return false;
-          if (m[1] !== undefined && Number(m[1]) !== {month}) return false;
-          return Number(m[2]) === {day};
-        }});
+        return document.querySelectorAll('[class*="screenInfo_timeItem"]').length > 0;
       }})()
     """))
+
+
+def is_staged(schedule: dict, movie_filter: str = "",
+              port: int = 9222) -> bool:
+    """예열되어 있는지만 가볍게 확인합니다 (브라우저를 건드리지 않음)."""
+    movie = movie_filter or schedule.get("movNm", "")
+    try:
+        tab = Tab(port=port)
+    except ChromeNotRunning:
+        return False
+    try:
+        return _staged(tab, movie)
+    except Exception:
+        return False
+    finally:
+        tab.close()
 
 
 def prepare(schedule: dict, movie_filter: str = "", screen_filter: str = "",
@@ -156,6 +160,7 @@ def prepare(schedule: dict, movie_filter: str = "", screen_filter: str = "",
     except ChromeNotRunning:
         return False
     try:
+        tab.widen()
         return _stage(tab, schedule, movie_filter, screen_filter)
     except Exception:
         return False
@@ -169,7 +174,7 @@ def _stage(tab, schedule: dict, movie: str, screen_filter: str) -> bool:
     theater = _theater_name(schedule)
     movie = movie or schedule.get("movNm", "")
 
-    if _staged(tab, movie, ymd):
+    if _staged(tab, movie):
         return True
 
     tab.goto(BOOK_URL)
@@ -202,10 +207,9 @@ def _stage(tab, schedule: dict, movie: str, screen_filter: str) -> bool:
         _log("영화 목록을 열지 못했습니다.")
         return False
 
-    if not tab.click(_js_date_item(ymd), until=JS_SHOWTIMES, timeout=8):
-        _log(f"날짜 {ymd} 를 선택하지 못했습니다.")
-        return False
-    return True
+    # 날짜는 고르지 않습니다. 영화를 고르면 CGV가 첫 상영일을 자동 선택해
+    # 회차 목록이 뜨고, 실제 예매 시 book()이 목표 날짜를 클릭합니다.
+    return tab.wait_for(JS_SHOWTIMES, timeout=8)
 
 
 def _theater_chosen(tab) -> bool:
@@ -255,13 +259,46 @@ def _js_date_item(ymd: str) -> str:
     """
 
 
-def _js_showtime(hhmm: str) -> str:
-    """상영 시작시간으로 회차 항목을 찾는 JS (매진 항목은 제외)."""
+def js_showtime_present(hhmm: str, screen: str) -> str:
+    """목표 상영관·회차가 화면 목록에 실제로 있는지 판정하는 JS 조건.
+
+    날짜를 클릭한 뒤 '회차 항목이 있으면 통과'로 기다리면, 이전 날짜의
+    낡은 목록에서 그대로 클릭하게 됩니다. 목표 회차가 나타날 때까지
+    기다려야 갱신이 끝난 것을 보장할 수 있습니다.
+    """
     return f"""
-      const want = {json.dumps(hhmm)};
-      const items = [...document.querySelectorAll('[class*="screenInfo_timeItem"]')]
+      (() => {{
+        const want = {json.dumps(hhmm)}, screen = {json.dumps(screen)};
+        const norm = s => (s || '').trim().replace(/\\s+/g, ' ');
+        const blocks = [...document.querySelectorAll('div, section, li')]
+          .filter(e => (e.innerText || '').includes(screen))
+          .filter(e => e.querySelectorAll('[class*="screenInfo_timeItem"]').length);
+        const scope = blocks.length ? blocks[blocks.length - 1] : document;
+        return [...scope.querySelectorAll('[class*="screenInfo_timeItem"]')]
+          .some(e => norm(e.innerText).startsWith(want));
+      }})()
+    """
+
+
+def _js_showtime(hhmm: str, screen: str) -> str:
+    """상영관 + 시작시간으로 회차 항목을 찾는 JS (매진 항목은 제외).
+
+    시작시간만 보면 안 됩니다. 같은 극장의 다른 상영관에 같은 시간대가
+    있어서 엉뚱한 관을 고릅니다. 실제로 IMAX관에 없는 25:00 이 1관에
+    있어서 1관을 골랐고, 좌석 locNo가 맞지 않아 실패했습니다.
+    화면의 특별관 필터에 의존하지 않고 상영관 이름으로 직접 좁힙니다.
+    """
+    return f"""
+      const want = {json.dumps(hhmm)}, screen = {json.dumps(screen)};
+      const norm = s => (s || '').trim().replace(/\\s+/g, ' ');
+      // 상영관 블록: 제목에 상영관 이름이 있고 회차 항목을 품은 가장 안쪽 요소
+      const blocks = [...document.querySelectorAll('div, section, li')]
+        .filter(e => (e.innerText || '').includes(screen))
+        .filter(e => e.querySelectorAll('[class*="screenInfo_timeItem"]').length);
+      const scope = blocks.length ? blocks[blocks.length - 1] : document;
+      const items = [...scope.querySelectorAll('[class*="screenInfo_timeItem"]')]
         .filter(e => !/disabled/i.test((e.className || '').toString()))
-        .filter(e => (e.innerText || '').trim().startsWith(want));
+        .filter(e => norm(e.innerText).startsWith(want));
       return items.map(e => e.querySelector('[class*="timeLink"]') || e);
     """
 
@@ -322,15 +359,23 @@ def _seat_map_open(tab) -> bool:
 def _js_seat(seat_loc_no: str) -> str:
     """data-seatlocno로 좌석 버튼을 찾는 JS.
 
-    이 값은 좌석 조회 API의 seatLocNo와 동일합니다. 같은 좌석이
-    메인맵/미니맵에 중복 렌더링되므로 후보를 모두 넘깁니다.
-    좌석 맵이 열린 뒤에만 보이므로 가시성도 확인합니다.
+    같은 좌석이 메인맵과 미니맵에 중복 렌더링됩니다. 미니맵 좌석은 3px
+    남짓이라 좌표가 조금만 어긋나도 옆 좌석이 눌립니다(실제로 y좌표가
+    4칸 밀린 좌석이 선택된 적이 있습니다). 큰 것(메인맵)부터 씁니다.
     """
     return f"""
       return [...document.querySelectorAll(
         'button[data-seatlocno={json.dumps(seat_loc_no)}]')]
         .filter(e => !e.disabled)
-        .filter(e => getComputedStyle(e).visibility !== 'hidden');
+        .filter(e => getComputedStyle(e).visibility !== 'hidden')
+        .sort((a, b) => {{
+          const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+          return (rb.width * rb.height) - (ra.width * ra.height);
+        }})
+        .filter(e => {{
+          const r = e.getBoundingClientRect();
+          return r.width >= 8 && r.height >= 8;   // 미니맵(3px) 제외
+        }});
     """
 
 
@@ -807,7 +852,10 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
 
     try:
         tab.front()
-        _log(f"{theater} {ymd} {hhmm} {movie} · 좌석 {len(seat_loc_nos)}개")
+        # 좌석맵이 가로로 넘치면 왼쪽 좌석이 화면 밖에 놓여 클릭할 수 없습니다.
+        tab.widen()
+        _log(f"{theater} {ymd} {hhmm} {schedule.get('scnsNm', '')} {movie} · "
+             f"{count}장 (후보 좌석 {len(seat_loc_nos)}개)")
 
         _mark("시작")
         # 극장 → 영화 → 날짜까지. 이미 그 상태면(예열) 즉시 지나갑니다.
@@ -816,6 +864,16 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             return False
         _mark("준비")
 
+        # 목표 회차가 목록에 나타날 때까지 기다립니다. 단순히 '회차가 있다'로
+        # 기다리면 이전 날짜의 낡은 목록에서 그대로 클릭하게 됩니다.
+        screen = schedule.get("scnsNm", "")
+        if not tab.click(_js_date_item(ymd),
+                         until=js_showtime_present(hhmm, screen), timeout=10):
+            _log(f"{ymd} 의 {screen} {hhmm} 회차가 목록에 없습니다 "
+                 f"(날짜 선택 실패 또는 매진).")
+            return False
+        _mark("날짜 선택")
+
         # URL은 페이지가 조작 가능해지기 전에 바뀝니다. 인원 버튼이 실제로
         # 렌더될 때까지 기다려야 다음 클릭이 먹습니다.
         js_visitor_page = (
@@ -823,8 +881,10 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             f"[...document.querySelectorAll('button[aria-label$=\"선택\"]')]"
             f".length > 0"
         )
-        if not tab.click(_js_showtime(hhmm), until=js_visitor_page, timeout=12):
-            _log(f"{hhmm} 회차를 선택하지 못했습니다 (매진되었을 수 있습니다).")
+        if not tab.click(_js_showtime(hhmm, screen), until=js_visitor_page,
+                         timeout=12):
+            _log(f"{screen} {hhmm} 회차를 선택하지 못했습니다 "
+                 f"(매진되었을 수 있습니다).")
             return False
 
         _mark("회차 선택")
@@ -872,14 +932,16 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             # 재시도 횟수를 늘려 한 번당 대기를 짧게 잡습니다.
             if not tab.click(_js_seat(loc), until=js_seat_on, timeout=2.4,
                              retries=4):
-                # 모달이 덮고 있어서 못 눌린 것일 수 있습니다.
+                # 의도한 좌석이 아니어도 이미 정원만큼 잡혔을 수 있습니다.
+                # 이걸 확인하지 않으면 잡힌 자리를 두고 계속 다른 자리를
+                # 누릅니다.
+                already = [x for x in _selected_locnos(tab) if x not in blocked]
+                if len(already) >= count:
+                    picked = already
+                    _log(f"좌석 {len(picked)}석 이미 선택됨 — 추가 클릭 중단")
+                    break
                 if (msg := _blocking_alert(tab)):
                     _dismiss_alert(tab)
-                    already = _selected_locnos(tab)
-                    if len(already) >= count:
-                        _log(f"안내 — {msg}")
-                        picked = [x for x in already if x not in blocked]
-                        break
                     _log(f"좌석 {loc} 실패 — {msg}")
                 else:
                     _log(f"좌석 {loc} 실패 — {_seat_state(tab, loc)}")

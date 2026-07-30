@@ -75,9 +75,7 @@ class ScheduleMonitor:
         # 망칩니다. 날짜가 여러 개면 8/10 예매 중에 8/11이 걸릴 수 있어
         # 한 번에 한 건만 진행하도록 잠금을 둡니다.
         self._book_lock = threading.Lock()
-        # 예열된 (타겟명, 날짜). 취소표가 뜬 뒤 첫 페이지 로드에 4초 가까이
-        # 쓰이므로, 감시 중 미리 회차 목록까지 띄워둡니다.
-        self._warmed: tuple[str, str] | None = None
+
         # 사이트별 마지막 요청 시간
         self._last_request: dict[str, float] = {}
         # 영화관별 상영일 목록 캐시 (조회시각, 목록)
@@ -302,6 +300,7 @@ class ScheduleMonitor:
         seen_any = False
 
         skipped = 0
+        first_sch: dict | None = None
         for ymd, holiday in self._target_dates(target, typ):
             # 조건에 맞는 회차가 없던 날짜는 한동안 건너뜁니다 (취소표 모드 한정).
             # 오픈 감시는 "없다가 생기는 것"을 잡아야 하므로 매번 확인합니다.
@@ -319,17 +318,21 @@ class ScheduleMonitor:
 
             if cancel_mode:
                 self._mark_empty_date(target["name"], ymd, not schedules)
+            if schedules and first_sch is None:
+                first_sch = schedules[0]
 
             if cancel_mode:
                 report.extend(
                     self._poll_cancel(target, schedules, typ, ymd)
                 )
-                # 자동 예매 타겟이면 예매 화면을 미리 띄워둡니다.
-                if target.get("auto_book") and schedules:
-                    self._warm(target, schedules[0], ymd)
             elif schedules:
                 self._poll_open(target, schedules, typ, ymd)
                 return  # 오픈 감지되면 나머지 날짜는 볼 필요 없음
+
+        # 예매 화면 예열은 타겟당 한 바퀴에 한 번만. 날짜별로 하면
+        # 브라우저를 계속 헤집습니다.
+        if cancel_mode and target.get("auto_book") and first_sch:
+            self._warm(target, first_sch)
 
         now = datetime.now().strftime("%H:%M:%S")
         tail = f" (미상영 {skipped}일 건너뜀)" if skipped else ""
@@ -594,22 +597,24 @@ class ScheduleMonitor:
             "url": _booking_url(sch, typ),
         })
 
-    def _warm(self, target: dict, sch: dict, ymd: str):
+    def _warm(self, target: dict, sch: dict):
         """예매 화면을 회차 목록까지 미리 열어둡니다.
 
-        브라우저를 쓰는 작업이므로 예매가 진행 중이면 건너뜁니다.
-        같은 (타겟, 날짜)로 이미 예열했으면 다시 하지 않습니다.
+        이미 그 상태면 아무것도 하지 않습니다. 예매가 진행 중이면
+        브라우저를 건드리지 않습니다.
         """
-        mark = (target["name"], ymd)
-        if self._warmed == mark:
+        from src import booker
+        try:
+            if booker.is_staged(sch, target.get("movie_filter", "")):
+                return
+        except Exception:
             return
         if not self._book_lock.acquire(blocking=False):
             return
         try:
-            from src import booker
             if booker.prepare(sch, movie_filter=target.get("movie_filter", ""),
                               screen_filter=target.get("screen_filter", "")):
-                self._warmed = mark
+                print(f"  예매 화면 예열 완료 ({target['name']})")
         except Exception as e:
             print(f"  예열 실패 - {e}")
         finally:

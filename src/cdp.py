@@ -83,6 +83,20 @@ class Tab:
                 continue  # 내비게이션 중 컨텍스트 교체
         return self.ev("location.href")
 
+    def widen(self, width: int = 2560, height: int = 1400):
+        """뷰포트를 넓힙니다.
+
+        좌석맵이 가로로 넘치면 왼쪽 좌석이 화면 밖(x<0)에 놓여 클릭할 수
+        없습니다. 미니맵 좌석은 3px라 눌러도 옆자리가 잡힙니다.
+        창 크기와 무관하게 전체 좌석맵이 들어오도록 뷰포트를 키웁니다.
+        """
+        try:
+            self.send("Emulation.setDeviceMetricsOverride", width=width,
+                      height=height, deviceScaleFactor=1, mobile=False)
+            return True
+        except RuntimeError:
+            return False
+
     def front(self):
         try:
             self.send("Page.bringToFront")
@@ -110,7 +124,10 @@ class Tab:
           const list = Array.isArray(found) ? found : [found];
           for (const el of list) {{
             if (!el || !(el.offsetWidth || el.offsetHeight)) continue;
-            el.scrollIntoView({{block: 'center', inline: 'center'}});
+            // behavior:'instant' 가 없으면 부드러운 스크롤 때문에
+            // 아직 도착하지 않은 위치의 좌표를 읽어 엉뚱한 곳을 누릅니다.
+            el.scrollIntoView({{block: 'center', inline: 'center',
+                                behavior: 'instant'}});
             const b = el.getBoundingClientRect();
             if (!b.width || !b.height) continue;
             const cx = b.x + b.width / 2, cy = b.y + b.height / 2;
