@@ -76,6 +76,10 @@ class ScheduleMonitor:
         # 자동 예매가 성공한 타겟. 기본적으로 한 번 성공하면 더 잡지 않습니다.
         # 조건에 맞는 자리가 여러 개면 반복 구매가 되기 때문입니다.
         self._booked: set[str] = set()
+        # 예매는 크롬 탭 하나를 몰기 때문에 동시에 두 건이 돌면 서로를
+        # 망칩니다. 날짜가 여러 개면 8/10 예매 중에 8/11이 걸릴 수 있어
+        # 한 번에 한 건만 진행하도록 잠금을 둡니다.
+        self._book_lock = threading.Lock()
         # 사이트별 마지막 요청 시간
         self._last_request: dict[str, float] = {}
         # 영화관별 상영일 목록 캐시 (조회시각, 목록)
@@ -603,6 +607,12 @@ class ScheduleMonitor:
         last = self._last_book.get(key)
         if last is not None and time.time() - last < BOOK_COOLDOWN:
             return
+
+        # 이미 다른 예매가 브라우저를 쓰고 있으면 건너뜁니다.
+        # 놓쳐도 다음 바퀴에 다시 잡힙니다.
+        if not self._book_lock.acquire(blocking=False):
+            print(f"  자동 예매 대기 — 다른 예매가 진행 중입니다 ({name})")
+            return
         self._last_book[key] = time.time()
 
         # 예매할 인원 수. 명시가 없으면 연석 조건(min_consecutive)을 씁니다.
@@ -642,6 +652,8 @@ class ScheduleMonitor:
                           f"다시 잡으려면 재시작하세요.")
             except Exception as e:
                 print(f"  자동 예매 실패 - {e}")
+            finally:
+                self._book_lock.release()
 
         threading.Thread(target=run, daemon=True).start()
 
