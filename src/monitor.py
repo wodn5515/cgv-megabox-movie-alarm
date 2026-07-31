@@ -21,6 +21,11 @@ EMPTY_DATE_TTL = 900
 # 취소와 매수가 같은 바퀴에 상쇄되면 수가 안 변해 좌석 변화를 놓치는데,
 # 이 갱신이 최악의 누락 시간을 이 값으로 묶어줍니다.
 SEAT_REFRESH_TTL = 300
+# 감시할 타겟이 하나도 없을 때 한 바퀴 쉬는 시간.
+IDLE_SLEEP = 5
+# 유휴 상태에서도 이 주기로는 로그를 한 줄 남깁니다.
+# 워치독의 STALE_SEC(300초)보다 충분히 짧아야 오탐 경보가 안 뜹니다.
+IDLE_LOG_INTERVAL = 60
 
 
 def _start_time(schedule: dict, typ: str) -> str:
@@ -85,6 +90,8 @@ class ScheduleMonitor:
         self._empty_dates: dict[tuple[str, str], float] = {}
         self._start_time = time.time()
         self._last_heartbeat = time.time()
+        # 마지막 유휴 로그 시각. 0이면 유휴에 들어가자마자 한 줄 남깁니다.
+        self._last_idle_log = 0.0
         self._last_check: str | None = None
         self._hits = 0
 
@@ -128,7 +135,10 @@ class ScheduleMonitor:
         self._last_heartbeat = time.time()
 
         while True:
-            for target in self.targets:
+            # 바퀴 도중 targets가 바뀌어도 안전하도록 스냅샷을 뜹니다.
+            targets = list(self.targets)
+            polled = False
+            for target in targets:
                 if self._opened.get(target["name"]):
                     continue
                 # 결제까지 끝난 타겟은 알림도 보내지 않습니다.
@@ -137,22 +147,36 @@ class ScheduleMonitor:
 
                 try:
                     self._poll(target)
+                    polled = True
                 except Exception as e:
                     now = datetime.now().strftime("%H:%M:%S")
                     print(f"[{now}] {target['name']}: 예기치 못한 오류 - {e}")
 
-                if not self._remaining_targets() and not self._has_cancel_target():
-                    now = datetime.now().strftime("%H:%M:%S")
-                    print(f"\n[{now}] 모든 타겟 오픈 감지 완료. 모니터링 종료.")
-                    notify_open(
-                        self.notif, "모니터링 종료", {"complete": True}
-                    )
-                    return
+            # 종료 조건은 for 밖에서 봅니다. 안에 두면 모든 타겟이 위에서
+            # 걸러졌을 때 이 줄에 도달조차 하지 않습니다.
+            if not self._remaining_targets() and not self._has_cancel_target():
+                now = datetime.now().strftime("%H:%M:%S")
+                print(f"\n[{now}] 모든 타겟 오픈 감지 완료. 모니터링 종료.")
+                notify_open(
+                    self.notif, "모니터링 종료", {"complete": True}
+                )
+                return
 
             # 1시간마다 살아있음 알림
             if time.time() - self._last_heartbeat >= HEARTBEAT_INTERVAL:
                 notify_heartbeat(self.notif, self._build_status())
                 self._last_heartbeat = time.time()
+
+            if not polled:
+                # 폴링할 타겟이 하나도 없는 유휴 상태. 대기는 _poll 안의
+                # RPM 제한뿐이라 이때 sleep이 없으면 CPU를 태웁니다.
+                # 주기 로그는 로그 파일 mtime을 갱신해서, 워치독에게
+                # "죽은 게 아니라 쉬는 중"임을 알리는 유일한 신호입니다.
+                time.sleep(IDLE_SLEEP)
+                if time.time() - self._last_idle_log >= IDLE_LOG_INTERVAL:
+                    now = datetime.now().strftime("%H:%M:%S")
+                    print(f"[{now}] 유휴 — 감시 중인 타겟 없음")
+                    self._last_idle_log = time.time()
 
     def _target_desc(self, t: dict) -> str:
         """시작할 때 보여줄 타겟 한 줄 요약."""
