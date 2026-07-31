@@ -721,7 +721,7 @@ def _mask(value: str) -> str:
     return value[:3] + "*" * (len(value) - 5) + value[-2:]
 
 
-CONFIRM_POLL_SEC = 10
+CONFIRM_POLL_SEC = 5
 # 좌석 선점 시간은 실측 약 5분입니다 (경고 모달이 2분 남을 때 뜨고,
 # 그 뒤 좌석 선택 화면으로 돌아가며 해제됩니다).
 # 카카오페이 화면에 있는 동안은 CGV의 연장 알림을 볼 수 없으므로
@@ -803,7 +803,8 @@ def _wait_and_confirm(tab, timeout: int = DEFAULT_CONFIRM_TIMEOUT) -> bool:
 
 
 def _kakao_handoff(tab, identity: dict,
-                   confirm_timeout: int = DEFAULT_CONFIRM_TIMEOUT) -> bool:
+                   confirm_timeout: int = DEFAULT_CONFIRM_TIMEOUT,
+                   on_pay_request=None) -> bool:
     """카카오페이 화면에서 승인 수단을 준비하고 멈춥니다.
 
     휴대폰번호·생년월일이 설정돼 있으면 '카톡결제'로 결제요청을 보냅니다.
@@ -818,6 +819,8 @@ def _kakao_handoff(tab, identity: dict,
         if tab.click(js_by_text("QR결제", tags="button, a, li, span, div"),
                      wait=1.5, retries=1):
             _log("카카오페이 QR이 표시되었습니다. 폰으로 스캔해 승인하세요.")
+            if on_pay_request:
+                on_pay_request("QR")
         else:
             _log("카카오페이 결제 화면입니다 (QR결제/카톡결제를 직접 고르세요).")
         # QR 화면에는 '확인' 버튼이 보이지 않지만, 스캔 후 마무리 클릭이
@@ -843,6 +846,8 @@ def _kakao_handoff(tab, identity: dict,
         return True
 
     _log("카카오톡으로 결제요청을 보냈습니다. 카톡에서 승인하세요.")
+    if on_pay_request:
+        on_pay_request("카톡결제")
     return _wait_and_confirm(tab, confirm_timeout)
 
 
@@ -915,7 +920,8 @@ def _to_payment_page(tab) -> bool:
     return True
 
 
-def _request_kakao_pay(tab, identity: dict, confirm_timeout: int) -> bool:
+def _request_kakao_pay(tab, identity: dict, confirm_timeout: int,
+                       on_pay_request=None) -> bool:
     """결제수단 화면에서 카카오페이를 골라 결제요청까지 보냅니다."""
     # 결제수단을 먼저 고릅니다. 수단을 고르면 약관 체크가 초기화되므로
     # 순서를 바꾸면 '전체 약관에 동의해주세요'에서 막힙니다.
@@ -941,13 +947,14 @@ def _request_kakao_pay(tab, identity: dict, confirm_timeout: int) -> bool:
         return False
 
     time.sleep(1.0)
-    return _kakao_handoff(tab, identity, confirm_timeout)
+    return _kakao_handoff(tab, identity, confirm_timeout, on_pay_request)
 
 
 def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
          screen_filter: str = "", count: int | None = None,
          port: int = 9222, pay: bool = False, kakao=None,
-         confirm_timeout: int = DEFAULT_CONFIRM_TIMEOUT) -> bool:
+         confirm_timeout: int = DEFAULT_CONFIRM_TIMEOUT,
+         on_pay_request=None) -> bool:
     """예매 화면을 열어 좌석 선택까지 진행합니다. 결제는 하지 않습니다.
 
     schedule: 모니터가 받은 회차 dict (siteNm, scnYmd, scnsrtTm, movNm 등)
@@ -1141,7 +1148,8 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             return "held"   # 선점만 됨 (결제 안 함)
 
         return ("paid" if _request_kakao_pay(
-            tab, kakao_identity(kakao), confirm_timeout) else "held")
+            tab, kakao_identity(kakao), confirm_timeout, on_pay_request)
+            else "held")
 
     except Exception as e:
         _log(f"진행 중 오류 - {e}")

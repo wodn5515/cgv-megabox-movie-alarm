@@ -631,6 +631,20 @@ class ScheduleMonitor:
         def run():
             try:
                 from src import booker
+                from src.notifier import notify_pay_request
+                typ = target.get("type", "cgv").lower()
+                pay_info = {
+                    "date": _pretty_date(sch.get("scnYmd", "")),
+                    "time": _start_time(sch, typ),
+                    "movie": sch.get("movNm", ""),
+                    "screen": sch.get("scnsNm", ""),
+                    "seats": seat_filter.describe([group]),
+                }
+
+                def on_pay_request(method):
+                    # QR/카톡 결제요청이 실제로 나간 순간, 결제 마무리를 재촉합니다.
+                    notify_pay_request(self.notif, name, method, pay_info)
+
                 ok = booker.book(
                     sch, seat_locs,
                     movie_filter=target.get("movie_filter", ""),
@@ -639,6 +653,7 @@ class ScheduleMonitor:
                     pay=bool(target.get("auto_pay")),
                     # 타겟에 지정된 것만 씁니다. 없으면 QR로 진행합니다.
                     kakao=target.get("kakaopay"),
+                    on_pay_request=on_pay_request,
                     **({"confirm_timeout": int(target["pay_timeout_sec"])}
                        if target.get("pay_timeout_sec") else {}),
                 )

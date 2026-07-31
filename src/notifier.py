@@ -126,7 +126,7 @@ def notify_cancel(notif: dict, target_name: str, info: dict):
         icon = "🔁"
         counts = f"잔여 {info['free']}/{info['total']}석"
     else:
-        title = "취소표 발생!"
+        title = "취소표 발견!"
         icon = "🎟️"
         counts = f"잔여 {info['free']}/{info['total']}석 (신규 {info['gained']}석)"
 
@@ -154,15 +154,43 @@ def notify_cancel(notif: dict, target_name: str, info: dict):
     if seats_str:
         discord_lines.append(f"좌석: **{seats_str}**")
         telegram_lines.append(f"좌석: {seats_str}")
-    url = info.get("url", "")
-    discord_lines.append(url)
-    telegram_lines.append(url)
 
     _send_discord(
         notif.get("discord_webhook_url", ""),
         {"content": "\n".join(discord_lines)},
     )
     send_telegram(_telegram_cfg(notif), "\n".join(telegram_lines))
+
+
+def notify_pay_request(notif: dict, target_name: str, method: str, info: dict):
+    """auto_pay로 결제요청(QR/카톡)이 나갔을 때, 결제 마무리를 재촉합니다.
+
+    좌석은 이미 선점됐고 QR 스캔·카톡 승인만 하면 되는 상태이므로, 놓치지
+    않게 @here 멘션으로 한 번 더 크게 알립니다.
+
+    method: "QR" 또는 "카톡결제"
+    info = {"date","time","movie","screen","seats"(옵션)}
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    headline = f"{info['date']} {info['time']} · {info['movie']} · {info['screen']}"
+    seats_str = ", ".join(info.get("seats") or [])
+    how = "QR을 스캔해" if method == "QR" else "카톡으로 온 결제요청을 승인해"
+
+    print(f"[{now}] 결제 요청({method}) 발송 — {target_name}: {how} 결제 완료 필요")
+
+    lines = [
+        "@here",
+        f"💳 **결제해주세요! ({method}) — {target_name}**",
+        headline,
+    ]
+    if seats_str:
+        lines.append(f"좌석: **{seats_str}**")
+    lines.append(f"좌석 선점됨 · 폰에서 {how} 주세요. (미결제 시 곧 풀립니다)")
+
+    _send_discord(notif.get("discord_webhook_url", ""), {"content": "\n".join(lines)})
+    send_telegram(_telegram_cfg(notif), "\n".join(
+        l.replace("**", "") for l in lines if l != "@here"
+    ))
 
 
 def _format_uptime(seconds: float) -> str:
