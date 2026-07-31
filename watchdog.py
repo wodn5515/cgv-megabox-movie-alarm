@@ -6,6 +6,7 @@ monitor.log가 일정 시간 갱신되지 않으면 = 모니터가 죽거나 멈
 (launchd에서 몇 분마다 한 번씩 실행되는 것을 전제로 함.)
 """
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -28,8 +29,13 @@ def load_notif() -> dict:
     try:
         with open(CONFIG, "r", encoding="utf-8") as f:
             c = yaml.safe_load(f) or {}
-    except Exception:
-        return {}
+    except Exception as e:
+        # 설정을 못 읽으면 웹훅도 못 찾으므로 경보 자체를 보낼 수 없습니다.
+        # 조용히 끝내면 모니터가 죽어도 알 방법이 없어서, stderr에 남기고
+        # 종료 코드 2로 구분해 launchd 로그에서 바로 보이게 합니다.
+        print(f"config.yaml 읽기 실패 — 워치독을 실행할 수 없습니다: {e}",
+              file=sys.stderr)
+        raise SystemExit(2)
     return c.get("notifications", {}) or {}
 
 
