@@ -260,10 +260,14 @@ def _js_date_item(ymd: str) -> str:
     달이 바뀌는 날은 'M.D' 형태가 됩니다.
     """
     month, day = int(ymd[4:6]), int(ymd[6:8])
+    # 칩은 <div class="dayScroll_scrollItem"><button class="dayScroll_scrollItem">
+    # 구조라 클래스로만 찾으면 바깥 div가 잡힙니다. el.click은 div엔 안 먹히고
+    # 좌표 클릭만 (자식 button을 히트테스트로) 통했습니다. 실제 클릭 대상인
+    # 안쪽 button을 직접 골라, 좌표 없는 el.click으로도 선택되게 합니다.
     return f"""
       const month = {month}, day = {day};
-      return [...document.querySelectorAll('[class*="dayScroll_scrollItem"]')]
-        .filter(e => !/disabled/i.test((e.className || '').toString()))
+      return [...document.querySelectorAll('button[class*="dayScroll_scrollItem"]')]
+        .filter(e => !/disabled/i.test((e.className || '').toString()) && !e.disabled)
         .filter(e => {{
           const t = (e.innerText || '').trim().replace(/\\s+/g, ' ');
           const m = t.match(/(?:(\\d{{1,2}})\\.)?(\\d{{1,2}})$/);
@@ -530,6 +534,25 @@ def _click_seat(tab, loc: str, until: str, timeout: float = 2.4,
         if tab.ev(f"!!({until})"):
             return True
         tab.js_click(_js_seat(loc))
+        if tab.wait_for(until, timeout=timeout / retries):
+            return True
+    return bool(tab.ev(f"!!({until})"))
+
+
+def _click_date(tab, ymd: str, until: str, timeout: float = 10.0,
+                retries: int = 5) -> bool:
+    """날짜 칩을 HTML(el.click)로 직접 눌러 목표 날짜가 활성화될 때까지 재시도.
+
+    날짜 스트립은 가로 스크롤이라, 좌표 기반 클릭(locate)은 스트립이 움직이는
+    순간 옆 날짜에 잘못 떨어질 수 있습니다(활성 날짜가 목표와 다른 날로 남아
+    회차 목록을 못 찾고 "회차가 목록에 없습니다"로 포기). 좌석과 마찬가지로
+    el.click()으로 좌표 없이 눌러 위치·스크롤과 무관하게 정확히 그 날짜를
+    선택합니다.
+    """
+    for _ in range(retries):
+        if tab.ev(f"!!({until})"):
+            return True
+        tab.js_click(_js_date_item(ymd))
         if tab.wait_for(until, timeout=timeout / retries):
             return True
     return bool(tab.ev(f"!!({until})"))
@@ -1000,7 +1023,7 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             f"({js_date_active(ymd)}) && "
             f"({js_showtime_ready(hhmm, screen, _int(schedule.get('frSeatCnt')), _int(schedule.get('stcnt')))})"
         )
-        if not tab.click(_js_date_item(ymd), until=until_date, timeout=10):
+        if not _click_date(tab, ymd, until_date, timeout=10):
             _log(f"{ymd} 의 {screen} {hhmm} 회차가 목록에 없습니다 "
                  f"(날짜 선택 실패 또는 매진).")
             return False
