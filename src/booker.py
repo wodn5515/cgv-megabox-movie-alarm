@@ -167,8 +167,13 @@ def prepare(schedule: dict, movie_filter: str = "", screen_filter: str = "",
         tab.close()
 
 
-def _stage(tab, schedule: dict, movie: str, screen_filter: str) -> bool:
-    """극장 → 영화 → 날짜까지 진행해 회차 목록을 띄웁니다."""
+def _stage(tab, schedule: dict, movie: str, screen_filter: str,
+           stage_timeout: float = 10.0) -> bool:
+    """극장 → 영화 → 날짜까지 진행해 회차 목록을 띄웁니다.
+
+    stage_timeout: 예매 페이지(극장 모달/영화 목록)가 뜰 때까지 기다리는
+    시간. 오픈런 대기열이 이 안에 통과되면 그대로 예매가 이어집니다.
+    """
     ymd = schedule.get("scnYmd", "")
     theater = _theater_name(schedule)
     movie = movie or schedule.get("movNm", "")
@@ -178,7 +183,8 @@ def _stage(tab, schedule: dict, movie: str, screen_filter: str) -> bool:
         return True
 
     tab.goto(BOOK_URL)
-    tab.wait_for(f"({JS_THEATER_MODAL})||({JS_MOVIE_LIST})", timeout=10)
+    tab.wait_for(f"({JS_THEATER_MODAL})||({JS_MOVIE_LIST})",
+                 timeout=stage_timeout)
     _mark("① 페이지 로드")
 
     # 예전엔 여기서 특별관(IMAX) 필터를 먼저 눌렀는데, 그러면 극장 목록이
@@ -977,7 +983,7 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
          screen_filter: str = "", count: int | None = None,
          port: int = 9222, pay: bool = False, kakao=None,
          confirm_timeout: int = DEFAULT_CONFIRM_TIMEOUT,
-         on_pay_request=None) -> bool:
+         on_pay_request=None, stage_timeout: float = 10.0) -> bool:
     """예매 화면을 열어 좌석 선택까지 진행합니다. 결제는 하지 않습니다.
 
     schedule: 모니터가 받은 회차 dict (siteNm, scnYmd, scnsrtTm, movNm 등)
@@ -1008,7 +1014,8 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
         _mark("시작")
         # 극장 → 영화 → 날짜까지. 이미 그 상태면(예열) 즉시 지나갑니다.
         # 첫 페이지 로드가 전체 시간의 대부분이라 여기가 관건입니다.
-        if not _stage(tab, schedule, movie, screen_filter):
+        if not _stage(tab, schedule, movie, screen_filter,
+                      stage_timeout=stage_timeout):
             return False
         _mark("⑥ 회차목록 대기")
 
