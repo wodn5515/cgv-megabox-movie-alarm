@@ -1,108 +1,178 @@
-# 예매 모니터 설정
+# ════════════════ 예매 모니터 설정 ════════════════
 #
 # max_requests_per_minute 는 사이트별 상한이며 모든 요청(상영일 목록·스케줄·
 # 좌석 배치도)이 여기에 포함됩니다. 루프는 이 상한에 붙어 계속 돌기 때문에
-# 하루 요청량은 이 값이 결정합니다 (30 → 43,200회/일).
+# 하루 요청량은 이 값이 결정합니다 (30 → 43,200회/일). 너무 높이면(120+)
+# CGV가 429(요청 과다)로 막을 수 있으니 60~80 권장.
 max_requests_per_minute: 30
 
 notifications:
-  # 취소표·예매 오픈 알림이 갈 웹훅
+  # 취소표·예매 오픈·결제요청 알림이 갈 웹훅
   discord_webhook_url: ""
 
   # 하트비트(1시간마다 오는 상태 알림)와 워치독 경보를 따로 받을 웹훅.
   # 비워두면 위 discord_webhook_url으로 같이 갑니다.
-  # 알림 채널을 조용하게 유지하려면 별도 채널 웹훅을 넣으세요.
   heartbeat_webhook_url: ""
 
-  # 텔레그램 푸시 (Discord보다 폰 도달이 빠릅니다)
-  # python3 telegram_setup.py <봇토큰> 을 돌리면 chat_id를 찾아줍니다.
+  # 텔레그램 푸시 (Discord보다 폰 도달이 빠름)
+  # python3 telegram_setup.py <봇토큰> 으로 chat_id를 찾습니다.
   telegram:
     bot_token: ""
     chat_id: ""
 
-# 모니터링 대상
+
+# ─────────────── 타겟 필드 레퍼런스 ───────────────
 #
-# type: cgv 또는 megabox   (CGV: site_no / 메가박스: branch_no)
-# mode: open(기본, 예매 오픈 감시) 또는 cancel(취소표 감시)
-# dates: all | {from, to} | 목록 | date 단일   (메가박스는 목록만)
-# screen_filter: 상영관 타입 (IMAX, DOLBY, 4DX, SCREENX 등)
-# movie_filter: 영화명 키워드 (일부만 적어도 매칭)
+# [공통]
+#   name           : 알림에 표시될 이름 (타겟마다 서로 다르게! 같은 이름은
+#                    상태가 충돌합니다)
+#   type           : cgv 또는 megabox
+#   site_no        : CGV 영화관 코드   (예: 용산아이파크몰 "0013")
+#   branch_no      : 메가박스 지점 코드 (megabox 전용)
+#   screen_filter  : 상영관 타입 키워드 (IMAX / DOLBY / 4DX / SCREENX …)
+#   movie_filter   : 영화명 키워드 (일부만 적어도 매칭)
+#   mode           : open(기본) = 예매 오픈 감시 / cancel = 취소표(빈자리) 감시
 #
-# 좌석 위치 조건(seats)과 자동 예매는 CGV 전용입니다.
+# [날짜] (셋 중 하나)
+#   date:  "20260810"                 → 단일 날짜
+#   dates: ["20260810","20260811"]    → 지정한 날짜들
+#   dates: {from:"20260810", to:"20260818"}  → 기간 (한쪽만 적으면 그쪽만 제한)
+#   dates: all                        → 예매 가능한 상영일 전체 (CGV 전용)
+#   ※ 메가박스는 date/dates 목록만 (all·기간 미지원)
+#
+# [시간] (둘 중 하나, 없으면 하루 전체)
+#   time_range: ["18:00","21:30"]     → 요일 구분 없이 한 구간
+#   time_rules:                       → 평일/주말(공휴일 포함) 다르게
+#     weekday: ["19:00","22:00"]      → 월~금
+#     weekend: ["11:00","23:00"]      → 토·일·공휴일
+#     ※ 시작=끝(["19:00","19:00"])이면 그 시각 회차만
+#
+# [좌석 조건] seats  (CGV 전용, 없으면 잔여 "수"로만 감시)
+#   rows: ["G","H","I","J"]           → 감시할 열
+#   seat_no: [16, 29]                 → 번호 범위 ([16]이면 16번 이상)
+#   min_consecutive: 2                → 나란히 붙어야 하는 최소 좌석 수 (1=단일석도)
+#
+# [자동 예매] (CGV 전용)
+#   tickets: 2            → 예매 인원 (2명 이상이면 첫 좌석만 눌러 연석 자동선택)
+#   auto_book: true      → 좌석 선점 → 결제수단 화면까지
+#   auto_pay: true       → 카카오페이 결제요청까지 (최종 승인은 폰에서)
+#   auto_book_once: true → 결제 완료되면 그 타겟 감시 중단(기본). false면 반복 예매
+#   pay_timeout_sec: 240 → 결제 승인 대기(초). 초과 시 좌석 풀고 재시도
+#   queue_wait_sec: 30   → 오픈런 대기열 대비, 첫 페이지 로드 대기(초, 기본 10).
+#                          대기열이 이 시간 안에 통과되면 그대로 예매가 이어짐
+#   kakaopay: {phone, birth}  → 채우면 카톡결제(폰 승인), 비우면 QR결제 탭
+#
+# [취소표 전용]
+#   repeat_alert_sec: 60 → 자리가 계속 열려 있으면 이 주기로 다시 알림
+#                          (0/생략이면 새로 풀린 자리일 때만 1회)
+
 targets:
-  # 1) 예매 오픈 감시 — 스케줄이 등장하면 알림
-  - name: "용산 IMAX 헤일메리 오픈"
+  # 1) 오픈 감시 — 알림만 (가장 단순)
+  - name: "용산 IMAX 헤일메리 오픈알림"
     type: cgv
     site_no: "0013"
     date: "20260420"
     screen_filter: "IMAX"
     movie_filter: "헤일메리"
+    # mode 생략 = open. 스케줄이 등장하면 "예매 오픈!" 알림 1회
 
-  # 2) 취소표 감시 + 자동 예매 (실제로 쓰는 형태)
-  - name: "용산 IMAX 오디세이 취소표"
+  # 2) 오픈런 자동예매 — 오픈되는 순간 좌석 잡기 (대기열 30초 버팀)
+  - name: "용산 IMAX 오디세이 오픈런"
     type: cgv
     site_no: "0013"
-    dates:                          # 8/10 ~ 8/18
-      from: "20260810"
-      to: "20260818"
+    mode: open
+    dates: {from: "20260901", to: "20260907"}
     screen_filter: "IMAX"
     movie_filter: "오디세이"
-    mode: cancel
-    time_range: ["18:00", "21:30"]  # 요일 구분 없이 18:00~21:30 회차
-    repeat_alert_sec: 60            # 자리가 열려 있는 동안 60초마다 다시 알림
-                                    # (지우거나 0이면 새로 풀린 자리일 때만 1회)
+    time_range: ["18:00", "22:00"]
     seats:
-      rows: ["K", "L", "M", "N"]    # 감시할 열
-      seat_no: [16, 29]             # 좌석 번호 범위 ([16] 이면 16번 이상)
-      min_consecutive: 2            # 나란히 붙어있어야 하는 최소 좌석 수
-    tickets: 2                      # 예매 인원. 2명 이상이면 첫 좌석만 눌러
-                                    # CGV의 연석 자동 선택에 맡깁니다.
-    auto_book: true                 # 좌석 선점 → 결제수단 화면까지
-    auto_pay: true                  # 카카오페이 결제요청까지 (승인은 폰으로)
-    auto_book_once: true            # 기본값. 결제까지 완료되면 그 타겟 감시를
-                                    # 중단합니다(알림도 안 옴).
-                                    # false 면 조건이 맞을 때마다 반복 예매해
-                                    # 표를 여러 장 살 수 있습니다.
-    pay_timeout_sec: 240            # 승인 대기. 좌석 선점이 약 5분이라
-                                    # 그보다 짧게 두고, 초과하면 초기 화면으로
-                                    # 빠져나가 좌석을 풀어줍니다.
-    kakaopay:                       # 채우면 카톡으로 결제요청이 옵니다.
-      phone: ""                     # 01012345678
-      birth: ""                     # YYMMDD 6자리
-                                    # 비워두면 QR결제 탭을 띄웁니다.
-                                    # 환경변수 CGV_KAKAO_PHONE /
-                                    # CGV_KAKAO_BIRTH 로도 지정할 수 있고,
-                                    # kakaopay: true 로 두면 그것만 씁니다.
+      rows: ["G", "H", "I", "J", "K"]
+      seat_no: [10, 20]
+      min_consecutive: 2
+    tickets: 2
+    auto_book: true
+    auto_pay: true
+    queue_wait_sec: 30              # 대기열 최대 30초 대기
+    pay_timeout_sec: 240
+    kakaopay:
+      phone: ""                     # 비우면 QR결제
+      birth: ""
 
-  # 3) 같은 극장의 다른 영화 — 1자리도 알림, 1장만 예매
-  - name: "용산 IMAX 스파이더맨 취소표"
+  # 3) 취소표 — 한 시간대 구간 (time_range), 카톡결제
+  - name: "용산 IMAX 오디세이 취소표 저녁"
     type: cgv
     site_no: "0013"
-    dates: ["20260801", "20260802"]
-    screen_filter: "IMAX"
-    movie_filter: "스파이더맨"
     mode: cancel
-    time_range: ["13:00", "19:00"]
+    dates: {from: "20260810", to: "20260818"}   # 8/10~8/18
+    screen_filter: "IMAX"
+    movie_filter: "오디세이"
+    time_range: ["18:00", "21:30"]  # 요일 구분 없이 18:00~21:30
     repeat_alert_sec: 60
     seats:
       rows: ["K", "L", "M", "N"]
       seat_no: [16, 29]
-      min_consecutive: 1            # 1자리만 나와도 알림
-    tickets: 1
+      min_consecutive: 2
+    tickets: 2
     auto_book: true
     auto_pay: true
     auto_book_once: true
     pay_timeout_sec: 240
     kakaopay:
-      phone: ""
-      birth: ""
+      phone: "01012345678"          # 채우면 카톡으로 결제요청
+      birth: "990101"               # YYMMDD
 
-  # 4) 메가박스 — 잔여 좌석 "수"로만 감시 (좌석 위치·자동 예매 미지원)
+  # 4) 취소표 — 평일/주말 시간대 다르게 (time_rules), 1자리도 QR
+  - name: "용산 IMAX 스파이더맨 취소표 요일별"
+    type: cgv
+    site_no: "0013"
+    mode: cancel
+    dates: ["20260801", "20260802", "20260808"]  # 지정 날짜들
+    screen_filter: "IMAX"
+    movie_filter: "스파이더맨"
+    time_rules:
+      weekday: ["19:00", "19:00"]   # 평일은 19:00 회차만
+      weekend: ["11:00", "23:00"]   # 주말·공휴일은 11:00~23:00
+    repeat_alert_sec: 60
+    seats:
+      rows: ["G", "H", "I", "J", "K", "L"]
+      seat_no: [16, 29]
+      min_consecutive: 1            # 1자리만 나와도
+    tickets: 1
+    auto_book: true
+    auto_pay: true                  # kakaopay 없음 → QR결제 (폰으로 스캔)
+    auto_book_once: true
+    pay_timeout_sec: 240
+
+  # 5) 취소표 — 상영일 전체 감시(dates: all), 알림만 (자동예매 없음)
+  - name: "용산 IMAX 오디세이 전회차 알림"
+    type: cgv
+    site_no: "0013"
+    mode: cancel
+    dates: all                      # 예매 가능한 모든 상영일
+    screen_filter: "IMAX"
+    movie_filter: "오디세이"
+    repeat_alert_sec: 120
+    seats:
+      rows: ["A", "B", "C"]
+      seat_no: [1, 40]
+      min_consecutive: 2
+    # auto_book 없음 → 조건 맞으면 알림만, 예매는 직접
+
+  # 6) 메가박스 — 잔여 좌석 "수"로만 감시 (좌석 위치·자동예매 미지원)
   - name: "코엑스 DOLBY 헤일메리 취소표"
     type: megabox
     branch_no: "1351"
-    date: "20260501"
+    mode: cancel
+    dates: ["20260501", "20260502"]  # 메가박스는 날짜 목록 명시 필수
     screen_filter: "DOLBY"
     movie_filter: "헤일메리"
-    mode: cancel
     repeat_alert_sec: 60
+
+
+# ─── CGV 영화관 코드 ───
+#  0013 용산아이파크몰 | 0089 센텀시티 | 0056 강남 | 0059 영등포타임스퀘어
+#  0074 왕십리 | 0112 여의도 | 0005 서면 | 0229 건대입구
+#
+# ─── 메가박스 지점 코드 (DOLBY) ───
+#  1351 코엑스 | 0019 남양주현대아울렛 | 7011 대구신세계 | 0028 대전신세계
+#  4062 송도 | 0052 수원AK | 0020 안성스타필드 | 4651 하남스타필드
