@@ -1,6 +1,6 @@
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from src import cgv_client, megabox_client, seat_filter
 from src.notifier import (
@@ -47,6 +47,24 @@ def _is_weekend(ymd: str, holiday: bool) -> bool:
         return datetime.strptime(ymd, "%Y%m%d").weekday() >= 5
     except ValueError:
         return False
+
+
+def _calendar_range(lo: str, hi: str) -> list[str]:
+    """YYYYMMDD lo~hi 사이의 달력상 날짜를 모두 전개합니다.
+
+    오픈 감시에서 아직 예매가 안 열린(상영일 목록에 없는) 날짜까지 봐야 할 때
+    씁니다. 취소표 감시는 예매 가능한 날짜만 보므로 이 함수를 쓰지 않습니다.
+    """
+    try:
+        d0 = datetime.strptime(lo, "%Y%m%d")
+        d1 = datetime.strptime(hi, "%Y%m%d")
+    except ValueError:
+        return []
+    out = []
+    while d0 <= d1:
+        out.append(d0.strftime("%Y%m%d"))
+        d0 += timedelta(days=1)
+    return out
 
 
 def _pretty_date(ymd: str) -> str:
@@ -307,10 +325,17 @@ class ScheduleMonitor:
         elif isinstance(spec, dict):
             lo = str(spec.get("from") or "")
             hi = str(spec.get("to") or "")
-            wanted = [
-                d["scnYmd"] for d in days
-                if (not lo or d["scnYmd"] >= lo) and (not hi or d["scnYmd"] <= hi)
-            ]
+            cancel_mode = target.get("mode", "open") == "cancel"
+            if not cancel_mode and lo and hi:
+                # 오픈 감시는 "아직 예매가 안 열린 날짜"의 오픈을 잡아야 하므로,
+                # 예매 가능 목록과 교집합하지 않고 달력상 날짜를 그대로 봅니다.
+                wanted = _calendar_range(lo, hi)
+            else:
+                wanted = [
+                    d["scnYmd"] for d in days
+                    if (not lo or d["scnYmd"] >= lo)
+                    and (not hi or d["scnYmd"] <= hi)
+                ]
         elif isinstance(spec, str):
             wanted = [spec]
         else:
