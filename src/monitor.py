@@ -96,11 +96,23 @@ class ScheduleMonitor:
         self._hits = 0
 
     def _remaining_targets(self) -> list[dict]:
-        """아직 감지되지 않은 오픈 모드 타겟. 취소표 모드는 계속 감시하므로 제외."""
-        return [
-            t for t in self.targets
-            if t.get("mode", "open") == "open" and not self._opened.get(t["name"])
-        ]
+        """아직 '완료되지 않은' 오픈 모드 타겟. 취소표 모드는 계속 감시하므로 제외.
+
+        - 알림만: 오픈 감지되면 완료
+        - auto_book: 결제 완료(_booked) 전까지 완료 아님 (그 사이 종료하면
+          예매 스레드가 죽습니다)
+        """
+        rem = []
+        for t in self.targets:
+            if t.get("mode", "open") != "open":
+                continue
+            name = t["name"]
+            if t.get("auto_book"):
+                if name not in self._booked:
+                    rem.append(t)
+            elif not self._opened.get(name):
+                rem.append(t)
+        return rem
 
     def _has_cancel_target(self) -> bool:
         return any(t.get("mode", "open") == "cancel" for t in self.targets)
@@ -139,10 +151,13 @@ class ScheduleMonitor:
             targets = list(self.targets)
             polled = False
             for target in targets:
-                if self._opened.get(target["name"]):
-                    continue
-                # 결제까지 끝난 타겟은 알림도 보내지 않습니다.
+                # 결제까지 끝난 타겟은 더 보지 않습니다.
                 if target["name"] in self._booked:
+                    continue
+                # 오픈 감지된 타겟: 알림만이면 완료. auto_book이면 예매가
+                # 끝날 때까지(위 _booked) 계속 폴링해서 좌석을 잡습니다.
+                if (self._opened.get(target["name"])
+                        and not target.get("auto_book")):
                     continue
 
                 try:
@@ -427,24 +442,49 @@ class ScheduleMonitor:
         self, target: dict, schedules: list[dict], typ: str, ymd: str
     ):
         name = target["name"]
+        first = not self._opened.get(name)
         self._opened[name] = True
-        self._hits += 1
 
-        if typ == "megabox":
-            movie_names = {s.get("movieNm", "") for s in schedules}
-            screen_names = {s.get("theabExpoNm", "") for s in schedules}
-        else:
-            movie_names = {s.get("movNm", "") for s in schedules}
-            screen_names = {s.get("scnsNm", "") for s in schedules}
+        if first:
+            # 오픈 감지 알림은 한 번만. auto_book이면 오픈 후에도 계속
+            # 폴링되므로, 여기서 매번 알리면 알림 폭탄이 됩니다.
+            self._hits += 1
+            if typ == "megabox":
+                movie_names = {s.get("movieNm", "") for s in schedules}
+                screen_names = {s.get("theabExpoNm", "") for s in schedules}
+            else:
+                movie_names = {s.get("movNm", "") for s in schedules}
+                screen_names = {s.get("scnsNm", "") for s in schedules}
+            changes = {
+                "date": ymd,
+                "movies": sorted(movie_names),
+                "screens": sorted(screen_names),
+                "times": [_start_time(s, typ) for s in schedules],
+            }
+            notify_console(name, changes)
+            notify_open(self.notif, name, changes)
 
-        changes = {
-            "date": ymd,
-            "movies": sorted(movie_names),
-            "screens": sorted(screen_names),
-            "times": [_start_time(s, typ) for s in schedules],
-        }
-        notify_console(name, changes)
-        notify_open(self.notif, name, changes)
+        # 오픈 자동예매: 조건에 맞는 좌석을 잡습니다(취소표와 동일한 예매
+        # 흐름). 오픈 직후엔 좌석이 넉넉하므로 '새로 풀린 것'을 따지지 않고
+        # 조건에 맞는 자리를 바로 노립니다. 결제 완료(_booked) 전까지 반복.
+        if target.get("auto_book") and target.get("seats"):
+            self._book_open(target, schedules, typ, ymd)
+
+    def _book_open(self, target, schedules, typ, ymd):
+        """오픈된 회차에서 조건에 맞는 좌석을 잡습니다 (한 바퀴에 한 건)."""
+        seat_cfg = target.get("seats") or {}
+        for sch in schedules:
+            key = self._schedule_key(target["name"], sch, typ, ymd)
+            self._wait_for_rate_limit(typ)
+            try:
+                seats = cgv_client.available_seats(cgv_client.fetch_seats(sch))
+            except Exception as e:
+                print(f"  좌석 조회 실패 ({ymd} {_start_time(sch, typ)}) - {e}")
+                continue
+            groups = seat_filter.match(seats, seat_cfg)
+            if groups:
+                self._launch_booker(target, sch, key, groups[0])
+                return  # 예매는 한 번에 한 건만
 
     def _poll_cancel(
         self, target: dict, schedules: list[dict], typ: str, ymd: str
@@ -678,6 +718,10 @@ class ScheduleMonitor:
                     # 타겟에 지정된 것만 씁니다. 없으면 QR로 진행합니다.
                     kakao=target.get("kakaopay"),
                     on_pay_request=on_pay_request,
+                    # 오픈런 대기열을 버티도록 첫 페이지 로드 대기시간을
+                    # 늘릴 수 있습니다(기본 10초). 대기열이 이 안에 통과되면
+                    # 그대로 예매가 이어집니다.
+                    stage_timeout=int(target.get("queue_wait_sec", 10)),
                     **({"confirm_timeout": int(target["pay_timeout_sec"])}
                        if target.get("pay_timeout_sec") else {}),
                 )
