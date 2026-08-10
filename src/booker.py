@@ -178,42 +178,37 @@ def _stage(tab, schedule: dict, movie: str, screen_filter: str,
     theater = _theater_name(schedule)
     movie = movie or schedule.get("movNm", "")
 
-    if _staged(tab, movie):
-        _mark("이미 준비됨")
-        return True
-
+    # 예전엔 이미 그 영화 회차가 떠 있으면(_staged) 통째로 건너뛰고, 극장이
+    # 아무거나 선택돼 있으면(_theater_chosen) 극장 선택을 건너뛰었다. 그런데
+    # 둘 다 "어느 극장인지"를 안 봐서, 여러 극장을 감시하면 이전에 쓰던 극장
+    # (예: 용산)이 남은 채로 다른 극장(천호) 예매가 엉뚱하게 용산에서 진행되는
+    # 버그가 있었다. 그래서 매번 goto 후 타겟 극장을 명시적으로 다시 고른다.
+    # (goto하면 지역별 모달이 떠서 항상 선택 가능. screen_filter는 회차를
+    # 상영관 이름으로 고르므로 여기선 쓰지 않는다.)
     tab.goto(BOOK_URL)
     tab.wait_for(f"({JS_THEATER_MODAL})||({JS_MOVIE_LIST})",
                  timeout=stage_timeout)
     _mark("① 페이지 로드")
 
-    # 예전엔 여기서 특별관(IMAX) 필터를 먼저 눌렀는데, 그러면 극장 목록이
-    # 다시 그려져서 목록이 준비되기 전에 극장을 클릭하게 되고 cold-start에서
-    # 극장 선택이 간헐적으로 실패했습니다. 회차는 뒤에서 상영관 이름으로
-    # 고르므로 이 필터는 필요 없어 제거했습니다. (screen_filter 인자는
-    # 호출부 호환을 위해 남겨둡니다.)
-
-    if not _theater_chosen(tab):
-        # 극장 목록이 실제로 그려질 때까지 기다린 뒤 딱 한 번 클릭합니다.
-        # 준비 전에 누르면 빗나가고, until 실패로 재클릭하면 선택이 토글로
-        # 풀립니다.
-        theater_js = _js_modal("지역별", "button, span, li, div, label",
-                               theater, exact=True)
-        if not tab.wait_for(
-            f"(()=>{{const r=(()=>{{{theater_js}}})();"
-            f"return Array.isArray(r)&&r.length>0;}})()", timeout=8
-        ):
-            _log(f"극장 '{theater}' 목록이 나타나지 않았습니다.")
-            return False
-        if not tab.click(theater_js, until=JS_CONFIRM_BTN, timeout=8):
-            _log(f"극장 '{theater}' 를 찾지 못했습니다.")
-            return False
-        _mark("③ 극장 클릭")
-        if not tab.click(_js_modal("지역별", "button", "극장선택", exact=True),
-                         until=JS_THEATER_OK, timeout=8, retries=2):
-            _log(f"극장 '{theater}' 가 선택되지 않았습니다.")
-            return False
-        _mark("④ 극장선택 확정")
+    # 극장 목록이 실제로 그려질 때까지 기다린 뒤 딱 한 번 클릭합니다.
+    # 준비 전에 누르면 빗나가고, until 실패로 재클릭하면 선택이 토글로 풀립니다.
+    theater_js = _js_modal("지역별", "button, span, li, div, label",
+                           theater, exact=True)
+    if not tab.wait_for(
+        f"(()=>{{const r=(()=>{{{theater_js}}})();"
+        f"return Array.isArray(r)&&r.length>0;}})()", timeout=8
+    ):
+        _log(f"극장 '{theater}' 목록이 나타나지 않았습니다.")
+        return False
+    if not tab.click(theater_js, until=JS_CONFIRM_BTN, timeout=8):
+        _log(f"극장 '{theater}' 를 찾지 못했습니다.")
+        return False
+    _mark("③ 극장 클릭")
+    if not tab.click(_js_modal("지역별", "button", "극장선택", exact=True),
+                     until=JS_THEATER_OK, timeout=8, retries=2):
+        _log(f"극장 '{theater}' 가 선택되지 않았습니다.")
+        return False
+    _mark("④ 극장선택 확정")
 
     if not _movie_list_open(tab):
         tab.click(js_by_text("전체보기", tags="button, a"),
