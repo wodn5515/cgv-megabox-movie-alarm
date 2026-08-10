@@ -559,6 +559,24 @@ def _click_date(tab, ymd: str, until: str, timeout: float = 10.0,
     return bool(tab.ev(f"!!({until})"))
 
 
+def _click_visitor(tab, count: int, until: str, timeout: float = 9.0,
+                   retries: int = 3) -> bool:
+    """관람인원 버튼을 HTML(el.click)로 눌러 선택될 때까지 재시도.
+
+    인원 버튼이 일반/청소년 등 여러 그룹으로 중복 렌더되어(32개+) 좌표 기반
+    클릭이 숨은/엉뚱한 버튼을 눌러 선택이 안 잡히는 경우가 있습니다(실측:
+    좌표 클릭은 실패, el.click은 성공). 좌석·날짜와 마찬가지로 el.click()으로
+    좌표 없이 눌러 안정적으로 선택합니다.
+    """
+    for _ in range(retries):
+        if tab.ev(f"!!({until})"):
+            return True
+        tab.js_click(_js_visitor_count(count))
+        if tab.wait_for(until, timeout=timeout / retries):
+            return True
+    return bool(tab.ev(f"!!({until})"))
+
+
 def _seat_state(tab, seat_loc_no: str) -> str:
     """좌석 버튼의 실제 상태를 진단용으로 읽습니다.
 
@@ -1050,21 +1068,23 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             f".some(e=>e.getAttribute('aria-label')==='{count} 선택'"
             f" && e.getAttribute('aria-pressed')==='true')"
         )
-        if not tab.ev(f"!!({js_count_on})") and not tab.click(
-            _js_visitor_count(count), until=js_count_on, timeout=9, retries=3
+        if not tab.ev(f"!!({js_count_on})") and not _click_visitor(
+            tab, count, js_count_on, timeout=9, retries=3
         ):
             _log(f"인원 {count}명을 선택하지 못했습니다.")
             return False
 
         _mark("⑨ 인원 클릭")
         # 좌석 맵 열기. 반영이 늦을 때가 있어 열릴 때까지 확인합니다.
+        # '선택' 버튼도 좌표 클릭은 간헐 실패하고 el.click은 안정적이라
+        # js_click으로 누릅니다(실측: 좌표 실패, el.click 성공).
         for _ in range(6):
             if _seat_map_open(tab):
                 # 맵이 보이자마자 클릭하면 겉도는 경우가 있어 아주 짧게 둡니다.
                 time.sleep(0.15)
                 break
-            tab.click(_js_open_seat_map(), until=JS_SEATMAP_OPEN, timeout=3,
-                      retries=1)
+            tab.js_click(_js_open_seat_map())
+            tab.wait_for(JS_SEATMAP_OPEN, timeout=3)
         else:
             _log("좌석 맵을 열지 못했습니다.")
             return False
