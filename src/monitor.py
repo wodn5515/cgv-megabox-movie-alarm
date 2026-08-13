@@ -21,6 +21,12 @@ EMPTY_DATE_TTL = 900
 # 취소와 매수가 같은 바퀴에 상쇄되면 수가 안 변해 좌석 변화를 놓치는데,
 # 이 갱신이 최악의 누락 시간을 이 값으로 묶어줍니다.
 SEAT_REFRESH_TTL = 300
+# 오픈 감시가 한 바퀴에 건너뛸 수 있는 '이미 열린 날짜' 수의 상한.
+# 지정한 날짜 대부분이 이미 열려 있으면 커서를 미오픈 지점까지 밀어야 하는데,
+# 한 바퀴에 하나씩 밀면 수십 바퀴가 걸린다. 그렇다고 무제한으로 밀면 첫 바퀴에
+# 요청이 몰린다. 몇 바퀴에 걸쳐 나눠 미는 타협값이다. 지평선에 닿고 나면
+# 그 뒤로는 계속 바퀴당 1회다.
+OPEN_SKIP_PER_CYCLE = 8
 # 감시할 타겟이 하나도 없을 때 한 바퀴 쉬는 시간.
 IDLE_SLEEP = 5
 # 유휴 상태에서도 이 주기로는 로그를 한 줄 남깁니다.
@@ -98,6 +104,15 @@ class ScheduleMonitor:
         # 망칩니다. 날짜가 여러 개면 8/10 예매 중에 8/11이 걸릴 수 있어
         # 한 번에 한 건만 진행하도록 잠금을 둡니다.
         self._book_lock = threading.Lock()
+        # 오픈 감시 커서. 타겟별로 "지금 붙잡고 있는 날짜" 하나입니다.
+        self._open_cursor: dict[str, str] = {}
+        # 그 날짜를 직전 바퀴에 봤을 때 회차가 있었는지.
+        # 키가 없으면 아직 한 번도 안 본 날짜라는 뜻입니다.
+        self._open_prev: dict[str, bool] = {}
+        # 확인이 끝나 더 볼 필요가 없어진 날짜들 (타겟별).
+        self._open_done: dict[str, set[str]] = {}
+        # 볼 날짜가 다 떨어졌다고 이미 알린 타겟 (같은 줄 반복 방지).
+        self._open_exhausted: set[str] = set()
 
         # 사이트별 마지막 요청 시간
         self._last_request: dict[str, float] = {}
@@ -359,15 +374,18 @@ class ScheduleMonitor:
     def _poll(self, target: dict):
         typ = target.get("type", "cgv").lower()
         self._last_check = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cancel_mode = target.get("mode", "open") == "cancel"
+
+        if target.get("mode", "open") != "cancel":
+            self._poll_open_watch(target, typ)
+            return
+
         report: list[str] = []
         seen_any = False
 
         skipped = 0
         for ymd, holiday in self._target_dates(target, typ):
-            # 조건에 맞는 회차가 없던 날짜는 한동안 건너뜁니다 (취소표 모드 한정).
-            # 오픈 감시는 "없다가 생기는 것"을 잡아야 하므로 매번 확인합니다.
-            if cancel_mode and self._is_empty_date(target["name"], ymd):
+            # 조건에 맞는 회차가 없던 날짜는 한동안 건너뜁니다.
+            if self._is_empty_date(target["name"], ymd):
                 skipped += 1
                 continue
 
@@ -379,28 +397,102 @@ class ScheduleMonitor:
                 continue
             seen_any = True
 
-            if cancel_mode:
-                self._mark_empty_date(target["name"], ymd, not schedules)
-
-            if cancel_mode:
-                report.extend(
-                    self._poll_cancel(target, schedules, typ, ymd)
-                )
-            elif schedules:
-                self._poll_open(target, schedules, typ, ymd)
-                return  # 오픈 감지되면 나머지 날짜는 볼 필요 없음
+            self._mark_empty_date(target["name"], ymd, not schedules)
+            report.extend(self._poll_cancel(target, schedules, typ, ymd))
 
         now = datetime.now().strftime("%H:%M:%S")
         tail = f" (미상영 {skipped}일 건너뜀)" if skipped else ""
-        if cancel_mode and (seen_any or skipped):
+        if seen_any or skipped:
             if report:
                 head = " | ".join(report[:6])
                 more = f" (+{len(report) - 6}개 회차)" if len(report) > 6 else ""
                 print(f"[{now}] {target['name']}: 빈자리 {head}{more}{tail}")
             else:
                 print(f"[{now}] {target['name']}: 조건에 맞는 빈자리 없음{tail}")
-        elif not cancel_mode and seen_any:
-            print(f"[{now}] {target['name']}: 미오픈")
+
+    def _poll_open_watch(self, target: dict, typ: str):
+        """오픈 감시: 아직 안 열린 가장 빠른 날짜 '하나'만 붙잡고 봅니다.
+
+        날짜를 전부 훑으면 미오픈 날짜 수만큼 요청이 나가고, 그만큼 한 바퀴가
+        길어져 정작 열리는 순간을 늦게 잡습니다. 오픈은 빠른 날짜부터 순서대로
+        열리므로 가장 빠른 미오픈 날짜 하나만 보면 충분하고, 바퀴당 요청도
+        날짜 수와 무관하게 1회로 고정됩니다.
+
+        오픈 판정은 "직전 바퀴엔 조건에 맞는 회차가 없었는데 이번 바퀴엔
+        있다"는 상태 전이로 합니다. 있다는 사실만으로 판정하면 재시작할 때마다
+        이미 열려 있던 날짜를 오픈으로 오인해 표를 사버립니다.
+
+        판정 기준은 반드시 **필터를 통과한 회차**여야 합니다. 그 날짜에 스케줄이
+        하나라도 있으면 열린 것으로 보면 안 됩니다. CGV는 날짜를 통째로 열지
+        않고 특별 상영(GV·콘서트 실황 등)만 먼저 걸어두는 부분 오픈을 하기
+        때문입니다. 실제로 영등포 08/26은 정규 시간표가 열리기 전인데도 7·8관에
+        8회차가 잡혀 있었습니다. 그걸 오픈으로 보면 그 날짜를 건너뛰어
+        정작 IMAX 회차가 열리는 순간을 놓칩니다.
+        """
+        name = target["name"]
+        today = datetime.now().strftime("%Y%m%d")
+        done = self._open_done.setdefault(name, set())
+        dates = self._target_dates(target, typ)
+
+        # 이미 열린 날짜는 그 자리에서 건너뛰고 미오픈 지점까지 밀어붙입니다.
+        # 미오픈에 닿거나 상한에 걸리면 멈춥니다.
+        for _ in range(OPEN_SKIP_PER_CYCLE):
+            now = datetime.now().strftime("%H:%M:%S")
+
+            cursor = cursor_holiday = None
+            for ymd, holiday in dates:
+                if ymd < today or ymd in done:
+                    continue
+                cursor, cursor_holiday = ymd, holiday
+                break
+
+            if cursor is None:
+                if name not in self._open_exhausted:
+                    self._open_exhausted.add(name)
+                    print(f"[{now}] {name}: 감시할 날짜가 없습니다 "
+                          f"(모두 지났거나 확인이 끝났습니다)")
+                return
+            self._open_exhausted.discard(name)
+
+            # 커서가 다른 날짜로 옮겨갔으면 직전 관측 상태는 그 날짜 것이므로
+            # 버립니다. 새 날짜는 "아직 안 본 날짜"에서 다시 시작합니다.
+            if self._open_cursor.get(name) != cursor:
+                self._open_cursor[name] = cursor
+                self._open_prev.pop(name, None)
+
+            time_range = self._time_range_for(target, cursor, cursor_holiday)
+
+            self._wait_for_rate_limit(typ)
+            raw = self._fetch_raw(target, typ, cursor)
+            if raw is None:
+                # 요청 실패. 상태를 건드리면 실패가 "미오픈"으로 기록되어
+                # 다음 바퀴에 가짜 전이가 잡힙니다. 그대로 두고 다시 봅니다.
+                return
+            matched = self._apply_filters(target, typ, raw, time_range)
+
+            was_open = self._open_prev.get(name)  # None이면 아직 안 본 날짜
+            self._open_prev[name] = bool(matched)
+
+            if not matched:
+                # raw가 비어있지 않아도 미오픈입니다. 부분 오픈(특별 상영만
+                # 먼저 걸린 상태)일 수 있어 몇 회차가 잡혀 있는지 남깁니다.
+                tail = (f" (그날 전체 {len(raw)}회차 있으나 조건 불일치)"
+                        if raw else "")
+                print(f"[{now}] {name}: {_pretty_date(cursor)} 미오픈{tail}")
+                return
+
+            if was_open is None:
+                # 처음 본 순간 이미 열려 있었습니다. 오픈 '순간'이 아니므로
+                # 예매하지 않습니다. 그 빈자리는 취소표 타겟의 몫입니다.
+                done.add(cursor)
+                print(f"[{now}] {name}: {_pretty_date(cursor)} 이미 오픈됨 "
+                      f"— 건너뜁니다")
+                continue
+
+            # 미오픈 → 오픈. 여기가 오픈런입니다.
+            done.add(cursor)
+            self._fire_open(target, matched, typ, cursor)
+            return
 
     def _is_empty_date(self, name: str, ymd: str) -> bool:
         seen = self._empty_dates.get((name, ymd))
@@ -413,27 +505,30 @@ class ScheduleMonitor:
         else:
             self._empty_dates.pop(key, None)
 
-    def _fetch_filtered(
-        self, target: dict, typ: str, date: str, time_range
+    def _fetch_raw(
+        self, target: dict, typ: str, date: str
     ) -> list[dict] | None:
-        """타겟 조건(상영관/영화/시간대)에 맞는 회차만 추려서 반환합니다.
+        """그 날짜의 전체 회차를 거르지 않고 반환합니다.
 
-        요청 실패 시 None을 돌려줍니다.
+        오픈 감시는 "날짜 자체가 열렸는가"와 "조건에 맞는 회차가 있는가"를
+        나눠 봐야 해서, 필터 전 원본이 필요합니다.
+        요청 실패 시 None을 돌려줍니다(빈 목록과 구분해야 합니다).
         """
-        screen_filter = target.get("screen_filter", "")
-        movie_filter = target.get("movie_filter", "")
         now = datetime.now().strftime("%H:%M:%S")
-
         try:
             if typ == "megabox":
-                schedules = megabox_client.fetch_schedule(
-                    target["branch_no"], date
-                )
-            else:
-                schedules = cgv_client.fetch_schedule(target["site_no"], date)
+                return megabox_client.fetch_schedule(target["branch_no"], date)
+            return cgv_client.fetch_schedule(target["site_no"], date)
         except Exception as e:
             print(f"[{now}] {target['name']} {date}: 요청 실패 - {e}")
             return None
+
+    def _apply_filters(
+        self, target: dict, typ: str, schedules: list[dict], time_range
+    ) -> list[dict]:
+        """타겟 조건(상영관/영화/시간대)에 맞는 회차만 추립니다."""
+        screen_filter = target.get("screen_filter", "")
+        movie_filter = target.get("movie_filter", "")
 
         # 상영관 필터링
         if screen_filter:
@@ -463,35 +558,45 @@ class ScheduleMonitor:
 
         return schedules
 
-    def _poll_open(
+    def _fetch_filtered(
+        self, target: dict, typ: str, date: str, time_range
+    ) -> list[dict] | None:
+        """조회 + 필터링. 요청 실패 시 None을 돌려줍니다."""
+        schedules = self._fetch_raw(target, typ, date)
+        if schedules is None:
+            return None
+        return self._apply_filters(target, typ, schedules, time_range)
+
+    def _fire_open(
         self, target: dict, schedules: list[dict], typ: str, ymd: str
     ):
-        name = target["name"]
-        first = not self._opened.get(name)
-        self._opened[name] = True
+        """미오픈 → 오픈 전이를 처리합니다. 알리고, 자동예매를 겁니다.
 
-        if first:
-            # 오픈 감지 알림은 한 번만. auto_book이면 오픈 후에도 계속
-            # 폴링되므로, 여기서 매번 알리면 알림 폭탄이 됩니다.
-            self._hits += 1
-            if typ == "megabox":
-                movie_names = {s.get("movieNm", "") for s in schedules}
-                screen_names = {s.get("theabExpoNm", "") for s in schedules}
-            else:
-                movie_names = {s.get("movNm", "") for s in schedules}
-                screen_names = {s.get("scnsNm", "") for s in schedules}
-            changes = {
-                "date": ymd,
-                "movies": sorted(movie_names),
-                "screens": sorted(screen_names),
-                "times": [_start_time(s, typ) for s in schedules],
-            }
-            notify_console(name, changes)
-            notify_open(self.notif, name, changes)
+        커서가 날짜마다 한 번씩만 여기 도달하므로(_poll_open_watch에서 곧바로
+        done 처리) 알림 중복 걱정 없이 매 전이를 그대로 알립니다.
+        """
+        name = target["name"]
+        self._opened[name] = True
+        self._hits += 1
+
+        if typ == "megabox":
+            movie_names = {s.get("movieNm", "") for s in schedules}
+            screen_names = {s.get("theabExpoNm", "") for s in schedules}
+        else:
+            movie_names = {s.get("movNm", "") for s in schedules}
+            screen_names = {s.get("scnsNm", "") for s in schedules}
+        changes = {
+            "date": ymd,
+            "movies": sorted(movie_names),
+            "screens": sorted(screen_names),
+            "times": [_start_time(s, typ) for s in schedules],
+        }
+        notify_console(name, changes)
+        notify_open(self.notif, name, changes)
 
         # 오픈 자동예매: 조건에 맞는 좌석을 잡습니다(취소표와 동일한 예매
         # 흐름). 오픈 직후엔 좌석이 넉넉하므로 '새로 풀린 것'을 따지지 않고
-        # 조건에 맞는 자리를 바로 노립니다. 결제 완료(_booked) 전까지 반복.
+        # 조건에 맞는 자리를 바로 노립니다.
         if target.get("auto_book") and target.get("seats"):
             self._book_open(target, schedules, typ, ymd)
 
