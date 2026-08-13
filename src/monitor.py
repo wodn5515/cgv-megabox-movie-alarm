@@ -412,9 +412,16 @@ class ScheduleMonitor:
         열리므로 가장 빠른 미오픈 날짜 하나만 보면 충분하고, 바퀴당 요청도
         날짜 수와 무관하게 1회로 고정됩니다.
 
-        오픈 판정은 "직전 바퀴엔 회차가 없었는데 이번 바퀴엔 있다"는 상태
-        전이로 합니다. 스케줄이 있다는 사실만으로 판정하면, 재시작할 때마다
+        오픈 판정은 "직전 바퀴엔 조건에 맞는 회차가 없었는데 이번 바퀴엔
+        있다"는 상태 전이로 합니다. 있다는 사실만으로 판정하면 재시작할 때마다
         이미 열려 있던 날짜를 오픈으로 오인해 표를 사버립니다.
+
+        판정 기준은 반드시 **필터를 통과한 회차**여야 합니다. 그 날짜에 스케줄이
+        하나라도 있으면 열린 것으로 보면 안 됩니다. CGV는 날짜를 통째로 열지
+        않고 특별 상영(GV·콘서트 실황 등)만 먼저 걸어두는 부분 오픈을 하기
+        때문입니다. 실제로 영등포 08/26은 정규 시간표가 열리기 전인데도 7·8관에
+        8회차가 잡혀 있었습니다. 그걸 오픈으로 보면 그 날짜를 건너뛰어
+        정작 IMAX 회차가 열리는 순간을 놓칩니다.
         """
         name = target["name"]
         now = datetime.now().strftime("%H:%M:%S")
@@ -453,18 +460,13 @@ class ScheduleMonitor:
         matched = self._apply_filters(target, typ, raw, time_range)
 
         was_open = self._open_prev.get(name)  # None이면 아직 안 본 날짜
-        self._open_prev[name] = bool(raw)
-
-        if not raw:
-            print(f"[{now}] {name}: {_pretty_date(cursor)} 미오픈")
-            return
+        self._open_prev[name] = bool(matched)
 
         if not matched:
-            # 날짜는 열렸는데 조건(상영관/영화/시간대)에 맞는 회차가 없습니다.
-            # 그날 편성이 없다는 뜻이니 계속 붙잡고 있으면 안 됩니다.
-            done.add(cursor)
-            print(f"[{now}] {name}: {_pretty_date(cursor)} 오픈됐지만 "
-                  f"조건에 맞는 회차 없음 — 다음 날짜로 넘어갑니다")
+            # raw가 비어있지 않아도 미오픈입니다. 부분 오픈(특별 상영만 먼저
+            # 걸린 상태)일 수 있어서, 몇 회차가 잡혀 있는지 같이 남깁니다.
+            tail = f" (그날 전체 {len(raw)}회차 있으나 조건 불일치)" if raw else ""
+            print(f"[{now}] {name}: {_pretty_date(cursor)} 미오픈{tail}")
             return
 
         if was_open is None:
