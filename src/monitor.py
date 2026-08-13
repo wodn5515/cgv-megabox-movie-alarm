@@ -21,6 +21,12 @@ EMPTY_DATE_TTL = 900
 # 취소와 매수가 같은 바퀴에 상쇄되면 수가 안 변해 좌석 변화를 놓치는데,
 # 이 갱신이 최악의 누락 시간을 이 값으로 묶어줍니다.
 SEAT_REFRESH_TTL = 300
+# 오픈 감시가 한 바퀴에 건너뛸 수 있는 '이미 열린 날짜' 수의 상한.
+# 지정한 날짜 대부분이 이미 열려 있으면 커서를 미오픈 지점까지 밀어야 하는데,
+# 한 바퀴에 하나씩 밀면 수십 바퀴가 걸린다. 그렇다고 무제한으로 밀면 첫 바퀴에
+# 요청이 몰린다. 몇 바퀴에 걸쳐 나눠 미는 타협값이다. 지평선에 닿고 나면
+# 그 뒤로는 계속 바퀴당 1회다.
+OPEN_SKIP_PER_CYCLE = 8
 # 감시할 타겟이 하나도 없을 때 한 바퀴 쉬는 시간.
 IDLE_SLEEP = 5
 # 유휴 상태에서도 이 주기로는 로그를 한 줄 남깁니다.
@@ -424,62 +430,69 @@ class ScheduleMonitor:
         정작 IMAX 회차가 열리는 순간을 놓칩니다.
         """
         name = target["name"]
-        now = datetime.now().strftime("%H:%M:%S")
         today = datetime.now().strftime("%Y%m%d")
         done = self._open_done.setdefault(name, set())
+        dates = self._target_dates(target, typ)
 
-        cursor = cursor_holiday = None
-        for ymd, holiday in self._target_dates(target, typ):
-            if ymd < today or ymd in done:
+        # 이미 열린 날짜는 그 자리에서 건너뛰고 미오픈 지점까지 밀어붙입니다.
+        # 미오픈에 닿거나 상한에 걸리면 멈춥니다.
+        for _ in range(OPEN_SKIP_PER_CYCLE):
+            now = datetime.now().strftime("%H:%M:%S")
+
+            cursor = cursor_holiday = None
+            for ymd, holiday in dates:
+                if ymd < today or ymd in done:
+                    continue
+                cursor, cursor_holiday = ymd, holiday
+                break
+
+            if cursor is None:
+                if name not in self._open_exhausted:
+                    self._open_exhausted.add(name)
+                    print(f"[{now}] {name}: 감시할 날짜가 없습니다 "
+                          f"(모두 지났거나 확인이 끝났습니다)")
+                return
+            self._open_exhausted.discard(name)
+
+            # 커서가 다른 날짜로 옮겨갔으면 직전 관측 상태는 그 날짜 것이므로
+            # 버립니다. 새 날짜는 "아직 안 본 날짜"에서 다시 시작합니다.
+            if self._open_cursor.get(name) != cursor:
+                self._open_cursor[name] = cursor
+                self._open_prev.pop(name, None)
+
+            time_range = self._time_range_for(target, cursor, cursor_holiday)
+
+            self._wait_for_rate_limit(typ)
+            raw = self._fetch_raw(target, typ, cursor)
+            if raw is None:
+                # 요청 실패. 상태를 건드리면 실패가 "미오픈"으로 기록되어
+                # 다음 바퀴에 가짜 전이가 잡힙니다. 그대로 두고 다시 봅니다.
+                return
+            matched = self._apply_filters(target, typ, raw, time_range)
+
+            was_open = self._open_prev.get(name)  # None이면 아직 안 본 날짜
+            self._open_prev[name] = bool(matched)
+
+            if not matched:
+                # raw가 비어있지 않아도 미오픈입니다. 부분 오픈(특별 상영만
+                # 먼저 걸린 상태)일 수 있어 몇 회차가 잡혀 있는지 남깁니다.
+                tail = (f" (그날 전체 {len(raw)}회차 있으나 조건 불일치)"
+                        if raw else "")
+                print(f"[{now}] {name}: {_pretty_date(cursor)} 미오픈{tail}")
+                return
+
+            if was_open is None:
+                # 처음 본 순간 이미 열려 있었습니다. 오픈 '순간'이 아니므로
+                # 예매하지 않습니다. 그 빈자리는 취소표 타겟의 몫입니다.
+                done.add(cursor)
+                print(f"[{now}] {name}: {_pretty_date(cursor)} 이미 오픈됨 "
+                      f"— 건너뜁니다")
                 continue
-            cursor, cursor_holiday = ymd, holiday
-            break
 
-        if cursor is None:
-            if name not in self._open_exhausted:
-                self._open_exhausted.add(name)
-                print(f"[{now}] {name}: 감시할 날짜가 없습니다 "
-                      f"(모두 지났거나 확인이 끝났습니다)")
-            return
-        self._open_exhausted.discard(name)
-
-        # 커서가 다른 날짜로 옮겨갔으면 직전 관측 상태는 그 날짜 것이므로
-        # 버립니다. 새 날짜는 "아직 안 본 날짜"에서 다시 시작합니다.
-        if self._open_cursor.get(name) != cursor:
-            self._open_cursor[name] = cursor
-            self._open_prev.pop(name, None)
-
-        time_range = self._time_range_for(target, cursor, cursor_holiday)
-
-        self._wait_for_rate_limit(typ)
-        raw = self._fetch_raw(target, typ, cursor)
-        if raw is None:
-            # 요청 실패. 상태를 건드리면 실패가 "미오픈"으로 기록되어
-            # 다음 바퀴에 가짜 전이가 잡힙니다. 그대로 두고 다시 봅니다.
-            return
-        matched = self._apply_filters(target, typ, raw, time_range)
-
-        was_open = self._open_prev.get(name)  # None이면 아직 안 본 날짜
-        self._open_prev[name] = bool(matched)
-
-        if not matched:
-            # raw가 비어있지 않아도 미오픈입니다. 부분 오픈(특별 상영만 먼저
-            # 걸린 상태)일 수 있어서, 몇 회차가 잡혀 있는지 같이 남깁니다.
-            tail = f" (그날 전체 {len(raw)}회차 있으나 조건 불일치)" if raw else ""
-            print(f"[{now}] {name}: {_pretty_date(cursor)} 미오픈{tail}")
-            return
-
-        if was_open is None:
-            # 처음 본 순간 이미 열려 있었습니다. 오픈 '순간'이 아니므로
-            # 예매하지 않습니다. 이미 열린 날짜의 빈자리는 취소표 타겟의 몫입니다.
+            # 미오픈 → 오픈. 여기가 오픈런입니다.
             done.add(cursor)
-            print(f"[{now}] {name}: {_pretty_date(cursor)} 이미 오픈된 날짜 "
-                  f"— 다음 날짜로 넘어갑니다")
+            self._fire_open(target, matched, typ, cursor)
             return
-
-        # 미오픈 → 오픈. 여기가 오픈런입니다.
-        done.add(cursor)
-        self._fire_open(target, matched, typ, cursor)
 
     def _is_empty_date(self, name: str, ymd: str) -> bool:
         seen = self._empty_dates.get((name, ymd))
