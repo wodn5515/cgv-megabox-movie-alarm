@@ -151,6 +151,22 @@ class Tab:
           }})()
         """))
 
+    def js_click_until(self, js_finder: str, until: str,
+                       timeout: float = 8.0, retries: int = 3) -> bool:
+        """el.click() 으로 누르고 조건이 참이 될 때까지 기다립니다.
+
+        click()의 el.click() 판. CGV의 React 컴포넌트 중에는 합성 좌표
+        이벤트(Input.dispatchMouseEvent)를 아예 받지 않는 것들이 있어
+        (극장 목록, 지역 탭, 인원 선택, 좌석) 그런 곳에 씁니다.
+        """
+        per_try = timeout / max(retries, 1)
+        for attempt in range(retries):
+            if self.js_click(js_finder) and self.wait_for(until, timeout=per_try):
+                return True
+            if attempt < retries - 1:
+                time.sleep(0.2 * (attempt + 1))
+        return False
+
     def wait_for(self, js_bool: str, timeout: float = 8.0,
                  interval: float = 0.08) -> bool:
         """조건이 참이 될 때까지 짧은 간격으로 확인합니다.
