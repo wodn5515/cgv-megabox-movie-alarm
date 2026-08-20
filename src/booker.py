@@ -96,6 +96,10 @@ def _js_movie_in_list(movie: str) -> str:
 
     텍스트 마커로 모달을 고르면 안 됩니다. '검색'은 영화 모달과 극장 모달
     양쪽에 있어서 잘못된 모달을 잡습니다. mvList를 품은 모달로 특정합니다.
+
+    제목은 innerText 가 아니라 textContent 로 봐야 합니다. 버튼 안의 제목
+    div가 렌더링상 가려져 있어 innerText 는 빈 문자열입니다(포스터 img의
+    alt 에만 보입니다). innerText 로 찾으면 64개 버튼이 전부 안 걸립니다.
     """
     return f"""
       const want = {json.dumps(movie)};
@@ -105,7 +109,7 @@ def _js_movie_in_list(movie: str) -> str:
         .pop();
       if (!modal) return null;
       return [...modal.querySelectorAll('ul[class*="mvList"] button')]
-        .filter(e => (e.innerText || '').includes(want));
+        .filter(e => (e.textContent || '').includes(want));
     """
 
 
@@ -167,6 +171,84 @@ def prepare(schedule: dict, movie_filter: str = "", screen_filter: str = "",
         tab.close()
 
 
+# 극장 선택 모달을 집는 JS 조각. 여러 곳에서 씁니다.
+JS_PICK_THEATER_MODAL = """
+  const modal = [...document.querySelectorAll('.cgv-modal')]
+    .filter(m => (m.offsetWidth || m.offsetHeight))
+    .filter(m => (m.innerText || '').includes('지역별'))
+    .pop();
+"""
+
+
+def _js_theater_in_list(theater: str) -> str:
+    """극장 목록(오른쪽 패널)에서 그 극장 버튼을 찾습니다.
+
+    모달 전체를 훑으면 지역 탭('경기(51)')까지 걸리므로 목록으로 한정합니다.
+    """
+    return f"""
+      {JS_PICK_THEATER_MODAL}
+      if (!modal) return null;
+      const want = {json.dumps(theater)};
+      const norm = s => (s || '').trim().replace(/\\s+/g, ' ');
+      return [...modal.querySelectorAll('div[class*="listCon"] ul li button')]
+        .filter(e => norm(e.innerText) === want);
+    """
+
+
+def _js_region_tab(label: str) -> str:
+    return f"""
+      {JS_PICK_THEATER_MODAL}
+      if (!modal) return null;
+      const want = {json.dumps(label)};
+      const norm = s => (s || '').trim().replace(/\\s+/g, ' ');
+      return [...modal.querySelectorAll('div[class*="region"] ul li button')]
+        .filter(e => norm(e.innerText) === want);
+    """
+
+
+def _theater_listed(tab, theater: str) -> bool:
+    return bool(tab.ev(
+        f"(()=>{{const r=(()=>{{{_js_theater_in_list(theater)}}})();"
+        f"return Array.isArray(r) && r.length > 0;}})()"
+    ))
+
+
+def _ensure_region(tab, theater: str) -> bool:
+    """그 극장이 보이는 지역 탭을 고릅니다.
+
+    모달은 항상 '서울'로 열리고, 선택된 지역의 극장만 DOM에 그려집니다.
+    그래서 지역 탭을 누르지 않으면 경기·인천 등 다른 지역 극장은 아예
+    찾을 수 없습니다(광교·판교 등).
+
+    지역 탭은 좌표 클릭(Input.dispatchMouseEvent)이 먹지 않아 el.click()을
+    씁니다. 좌석과 같은 사례입니다 — 실측으로 확인했습니다.
+        좌표 클릭 → active 그대로 '서울(29)'
+        el.click() → '경기(51)' 로 전환, 목록 51개로 교체
+    """
+    if _theater_listed(tab, theater):
+        return True
+
+    labels = tab.ev(f"""
+      (() => {{
+        {JS_PICK_THEATER_MODAL}
+        if (!modal) return [];
+        return [...modal.querySelectorAll('div[class*="region"] ul li button')]
+          .map(e => (e.innerText || '').trim().replace(/\\s+/g, ' '));
+      }})()
+    """) or []
+
+    for label in labels:
+        if not tab.js_click(_js_region_tab(label)):
+            continue
+        if tab.wait_for(
+            f"(()=>{{const r=(()=>{{{_js_theater_in_list(theater)}}})();"
+            f"return Array.isArray(r) && r.length > 0;}})()", timeout=2.0
+        ):
+            _log(f"극장 '{theater}' — 지역 '{label}' 에서 찾았습니다.")
+            return True
+    return False
+
+
 def _stage(tab, schedule: dict, movie: str, screen_filter: str,
            stage_timeout: float = 10.0) -> bool:
     """극장 → 영화 → 날짜까지 진행해 회차 목록을 띄웁니다.
@@ -192,20 +274,33 @@ def _stage(tab, schedule: dict, movie: str, screen_filter: str,
 
     # 극장 목록이 실제로 그려질 때까지 기다린 뒤 딱 한 번 클릭합니다.
     # 준비 전에 누르면 빗나가고, until 실패로 재클릭하면 선택이 토글로 풀립니다.
-    theater_js = _js_modal("지역별", "button, span, li, div, label",
-                           theater, exact=True)
-    if not tab.wait_for(
-        f"(()=>{{const r=(()=>{{{theater_js}}})();"
-        f"return Array.isArray(r)&&r.length>0;}})()", timeout=8
-    ):
-        _log(f"극장 '{theater}' 목록이 나타나지 않았습니다.")
+    theater_js = _js_theater_in_list(theater)
+    # 목록이 그려질 때까지 기다린 뒤 지역을 맞춥니다. 목록이 비어 있는 상태로
+    # 지역 탭을 훑으면 전부 헛돕니다.
+    if not tab.wait_for(f"""
+      (() => {{
+        {JS_PICK_THEATER_MODAL}
+        return !!modal &&
+          modal.querySelectorAll('div[class*="listCon"] ul li button').length > 0;
+      }})()""", timeout=8):
+        _log("극장 목록이 그려지지 않았습니다.")
         return False
-    if not tab.click(theater_js, until=JS_CONFIRM_BTN, timeout=8):
+    # 모달은 항상 '서울'로 열립니다. 다른 지역 극장이면 탭을 바꿔야 합니다.
+    if not _ensure_region(tab, theater):
+        _log(f"극장 '{theater}' 를 어느 지역에서도 찾지 못했습니다.")
+        return False
+    _mark("② 지역 확인")
+    # 극장 목록 버튼은 좌표 클릭(dispatchMouseEvent)을 받지 않습니다.
+    # 실측: 좌표 클릭 후 확정 버튼이 뜨지 않고, el.click()이면 뜹니다.
+    # 서울·경기 극장 모두 동일합니다.
+    if not tab.js_click_until(theater_js, JS_CONFIRM_BTN, timeout=8):
         _log(f"극장 '{theater}' 를 찾지 못했습니다.")
         return False
     _mark("③ 극장 클릭")
-    if not tab.click(_js_modal("지역별", "button", "극장선택", exact=True),
-                     until=JS_THEATER_OK, timeout=8, retries=2):
+    if not tab.js_click_until(
+        _js_modal("지역별", "button", "극장선택", exact=True),
+        JS_THEATER_OK, timeout=8, retries=3
+    ):
         _log(f"극장 '{theater}' 가 선택되지 않았습니다.")
         return False
     _mark("④ 극장선택 확정")
@@ -214,8 +309,8 @@ def _stage(tab, schedule: dict, movie: str, screen_filter: str,
         tab.click(js_by_text("전체보기", tags="button, a"),
                   until=JS_MOVIE_LIST, timeout=5, retries=1)
     if _movie_list_open(tab):
-        if not tab.click(_js_movie_in_list(movie),
-                         until=JS_DATES_READY, timeout=8):
+        if not tab.js_click_until(_js_movie_in_list(movie),
+                                  JS_DATES_READY, timeout=8):
             _log(f"영화 '{movie}' 를 목록에서 찾지 못했습니다.")
             return False
     else:
@@ -1056,8 +1151,10 @@ def book(schedule: dict, seat_loc_nos: list[str], movie_filter: str = "",
             f"[...document.querySelectorAll('button[aria-label$=\"선택\"]')]"
             f".length > 0"
         )
-        if not tab.click(_js_showtime(hhmm, screen), until=js_visitor_page,
-                         timeout=12):
+        # 회차 버튼도 좌표 클릭을 받지 않습니다(실측: 좌표는 URL 그대로,
+        # el.click 이면 인원 선택 페이지로 이동). 날짜·인원·좌석과 같습니다.
+        if not tab.js_click_until(_js_showtime(hhmm, screen), js_visitor_page,
+                                  timeout=12):
             _log(f"{screen} {hhmm} 회차를 선택하지 못했습니다 "
                  f"(매진되었을 수 있습니다).")
             return False
