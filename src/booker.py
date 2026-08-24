@@ -195,14 +195,87 @@ def _js_theater_in_list(theater: str) -> str:
     """
 
 
+# 극장이 어느 지역 탭에 있는지. 모달은 선택된 지역의 극장만 그리므로,
+# 탭을 하나씩 눌러보며 찾으면 뒤쪽 지역일수록 느립니다(부산/울산은 7번째라
+# 6번을 헛클릭). 미리 알고 있으면 한 번에 그 탭으로 갑니다.
+# 2026-08-24 예매 모달에서 수집한 175개. 없는 극장은 아래 탐색으로 넘어갑니다.
+_REGION_THEATERS = {
+    "서울": (
+        "강남", "강변", "건대입구", "고덕강일", "구로", "대학로", "동대문", "등촌", "명동", "미아",
+        "방학", "불광", "상봉", "성신여대입구", "수유", "신촌아트레온", "씨네드쉐프 압구정", "씨네드쉐프 용산",
+        "압구정", "여의도", "연남", "영등포타임스퀘어", "왕십리", "용산아이파크몰", "중계", "천호",
+        "청담씨네시티", "피카디리1958", "홍대"
+    ),
+    "경기": (
+        "Drive In 용인 크랙사이드", "경기광주", "고양백석", "고양행신", "광교", "광교상현", "광명역",
+        "구리", "구리갈매", "기흥", "김포", "김포운양", "김포한강", "남양주화도", "다산", "동백",
+        "동수원", "동탄", "동탄그랑파사쥬", "동탄역", "동탄호수공원", "배곧", "범계", "부천", "부천역",
+        "산본", "서현", "소풍", "스타필드시티위례", "신세계경기", "안산", "안성", "야탑", "양주옥정",
+        "역곡", "오리", "오산중앙", "용인", "의정부", "이천", "일산", "파주문산", "파주운정", "평촌",
+        "평택", "평택고덕", "평택소사", "포천", "화성봉담", "화정"
+    ),
+    "인천": (
+        "계양", "부평", "송도타임스페이스", "인천", "인천가정", "인천도화", "인천시민공원", "인천연수",
+        "인천학익", "주안역", "청라"
+    ),
+    "강원": (
+        "강릉", "기린", "원통", "인제", "춘천"
+    ),
+    "대전/충청": (
+        "논산", "당진", "대전", "대전가수원", "대전가오", "대전탄방", "대전터미널", "서산", "세종",
+        "아산", "유성노은", "천안", "천안터미널", "천안펜타포트", "청주(서문)", "청주지웰시티", "청주터미널",
+        "충북혁신", "충주교현", "홍성"
+    ),
+    "대구": (
+        "대구", "대구수성", "대구스타디움", "대구연경", "대구월성", "대구죽전", "대구한일", "대구현대"
+    ),
+    "부산/울산": (
+        "Drive In 영도", "대연", "동래", "부산명지", "서면", "서면삼정타워", "서면상상마당", "센텀시티",
+        "씨네드쉐프 센텀", "아시아드", "울산동구", "울산삼산", "울산성남", "울산신천", "울산진장", "정관",
+        "하단아트몰링", "해운대"
+    ),
+    "경상": (
+        "거제", "고성", "구미", "김천율곡", "김해", "김해율하", "김해장유", "마산", "북포항", "안동",
+        "양산삼호", "진주혁신", "창원더시티", "창원상남"
+    ),
+    "광주/전라/제주": (
+        "광양", "광양 엘에프스퀘어", "광주금남로", "광주상무", "광주용봉", "광주첨단", "광주충장로", "광주하남",
+        "나주", "목포평화광장", "서전주", "순천신대", "여수웅천", "익산", "전주고사", "전주에코시티",
+        "전주효자", "정읍", "제주", "제주노형"
+    ),
+}
+THEATER_REGION = {
+    _t: _r for _r, _ts in _REGION_THEATERS.items() for _t in _ts
+}
+# 탐색으로 알아낸 지역을 기억해 다음 예매부터는 바로 갑니다.
+_region_cache: dict = {}
+
+
+# 지역 탭만 정확히 집습니다. 자손 선택자(`div[class*="region"] ul li button`)로
+# 하면 오른쪽 극장 목록까지 걸립니다 — 그 목록도 같은 컨테이너 안에 있어서,
+# '강남' 같은 극장 버튼이 지역 탭으로 잡혀 엉뚱하게 눌립니다. 직계 자식으로 한정합니다.
+REGION_TAB_SEL = 'div[class*="region"] > ul > li > button'
+
+
 def _js_region_tab(label: str) -> str:
     return f"""
       {JS_PICK_THEATER_MODAL}
       if (!modal) return null;
       const want = {json.dumps(label)};
       const norm = s => (s || '').trim().replace(/\\s+/g, ' ');
-      return [...modal.querySelectorAll('div[class*="region"] ul li button')]
+      return [...modal.querySelectorAll({json.dumps(REGION_TAB_SEL)})]
         .filter(e => norm(e.innerText) === want);
+    """
+
+
+def _js_region_labels() -> str:
+    return f"""
+      (() => {{
+        {JS_PICK_THEATER_MODAL}
+        if (!modal) return [];
+        return [...modal.querySelectorAll({json.dumps(REGION_TAB_SEL)})]
+          .map(e => (e.innerText || '').trim().replace(/\\s+/g, ' '));
+      }})()
     """
 
 
@@ -213,38 +286,49 @@ def _theater_listed(tab, theater: str) -> bool:
     ))
 
 
+def _region_label_for(tab, theater: str) -> str | None:
+    """그 극장이 속한 지역 탭의 실제 라벨('부산/울산(18)')을 돌려줍니다."""
+    prefix = _region_cache.get(theater) or THEATER_REGION.get(theater)
+    if not prefix:
+        return None
+    for label in (tab.ev(_js_region_labels()) or []):
+        if label.split("(")[0] == prefix:
+            return label
+    return None
+
+
 def _ensure_region(tab, theater: str) -> bool:
     """그 극장이 보이는 지역 탭을 고릅니다.
 
     모달은 항상 '서울'로 열리고, 선택된 지역의 극장만 DOM에 그려집니다.
-    그래서 지역 탭을 누르지 않으면 경기·인천 등 다른 지역 극장은 아예
-    찾을 수 없습니다(광교·판교 등).
+    그래서 지역 탭을 누르지 않으면 경기·부산 등 다른 지역 극장은 아예
+    찾을 수 없습니다(광교·센텀시티 등).
 
     지역 탭은 좌표 클릭(Input.dispatchMouseEvent)이 먹지 않아 el.click()을
     씁니다. 좌석과 같은 사례입니다 — 실측으로 확인했습니다.
         좌표 클릭 → active 그대로 '서울(29)'
-        el.click() → '경기(51)' 로 전환, 목록 51개로 교체
+        el.click() → '경기(50)' 로 전환, 목록 50개로 교체
     """
     if _theater_listed(tab, theater):
         return True
 
-    labels = tab.ev(f"""
-      (() => {{
-        {JS_PICK_THEATER_MODAL}
-        if (!modal) return [];
-        return [...modal.querySelectorAll('div[class*="region"] ul li button')]
-          .map(e => (e.innerText || '').trim().replace(/\\s+/g, ' '));
-      }})()
-    """) or []
+    found_js = (f"(()=>{{const r=(()=>{{{_js_theater_in_list(theater)}}})();"
+                f"return Array.isArray(r) && r.length > 0;}})()")
 
-    for label in labels:
+    # 아는 극장이면 곧장 그 탭으로. 탭을 하나씩 눌러보는 것보다 훨씬 빠릅니다.
+    label = _region_label_for(tab, theater)
+    if label and tab.js_click(_js_region_tab(label)):
+        if tab.wait_for(found_js, timeout=2.5):
+            _log(f"극장 '{theater}' — 지역 '{label}'")
+            return True
+
+    # 모르는 극장(신규 개관 등)이면 탭을 훑습니다.
+    for label in (tab.ev(_js_region_labels()) or []):
         if not tab.js_click(_js_region_tab(label)):
             continue
-        if tab.wait_for(
-            f"(()=>{{const r=(()=>{{{_js_theater_in_list(theater)}}})();"
-            f"return Array.isArray(r) && r.length > 0;}})()", timeout=2.0
-        ):
-            _log(f"극장 '{theater}' — 지역 '{label}' 에서 찾았습니다.")
+        if tab.wait_for(found_js, timeout=2.0):
+            _region_cache[theater] = label.split("(")[0]
+            _log(f"극장 '{theater}' — 지역 '{label}' 에서 찾았습니다(탐색).")
             return True
     return False
 
