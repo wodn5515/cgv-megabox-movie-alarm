@@ -1097,6 +1097,25 @@ JS_PAY_BTN = """
 """
 
 
+def _alert_text(tab) -> str:
+    """화면에 떠 있는 안내 모달의 문구를 돌려줍니다(없으면 빈 문자열).
+
+    실패 로그에 원인을 함께 남기려고 씁니다. '결제하기 버튼을 누르지
+    못했습니다'만 남으면 좌석을 뺏긴 건지, 버튼이 안 눌린 건지,
+    시간이 지난 건지 구분할 수 없습니다.
+
+    '확인/닫기/취소'만 있는 안내 모달로 한정합니다. 아무 활성 모달이나
+    집으면 극장 선택 모달 같은 것이 걸려 극장 목록이 통째로 로그에 남습니다.
+    """
+    return (tab.ev(f"""
+      (() => {{
+        const m = ({JS_ALERT_MODAL}).pop();
+        if (!m) return '';
+        return (m.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 120);
+      }})()
+    """) or "").strip()
+
+
 def _to_payment_page(tab) -> bool:
     """좌석 선택 상태에서 결제수단 화면(/mpy/main)까지 밀어두고 멈춥니다.
 
@@ -1116,7 +1135,11 @@ def _to_payment_page(tab) -> bool:
     if not tab.click(JS_PAY_BTN,
                      until="!!document.querySelector('.cgv-modal.active')",
                      timeout=8):
-        _log("결제하기 버튼을 누르지 못했습니다.")
+        # 좌석을 남에게 뺏기면 여기서 막힙니다. 화면 문구를 같이 남겨
+        # "클릭이 안 먹었다"와 구분할 수 있게 합니다.
+        why = _alert_text(tab)
+        _log(f"결제하기 버튼을 누르지 못했습니다."
+             + (f" 화면 안내: {why}" if why else " (화면에 안내 모달 없음)"))
         return False
 
     js_on_pay_page = f"location.href.includes({json.dumps(PAY_URL_PART)})"
