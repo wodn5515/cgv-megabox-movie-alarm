@@ -206,6 +206,14 @@ class Tab:
             # 아직 렌더링 안 됐을 수 있으니 짧게 기다렸다 재시도
             if attempt < retries - 1:
                 time.sleep(0.25 * (attempt + 1))
+
+        # 좌표로 안 되면 el.click()으로 한 번 더. CGV에는 합성 좌표 이벤트를
+        # 아예 받지 않는 컨트롤이 흔하고(지역 탭·극장 목록·회차·인원·좌석),
+        # 어떤 것이 그런지 미리 알 수 없습니다. 좌표를 먼저 쓰는 순서는
+        # 유지하되(실제 입력과 구분되지 않음) 마지막에 이걸로 건집니다.
+        # until이 없으면 성공 여부를 판정할 수 없어 시도하지 않습니다.
+        if until and self.js_click(js_finder):
+            return self.wait_for(until, timeout=timeout / retries)
         return False
 
     def type_into(self, css: str, value: str, wait: float = 0.6) -> bool:
